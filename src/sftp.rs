@@ -190,6 +190,19 @@ impl SftpClient {
         Ok((buf, truncated))
     }
 
+    /// Expands leading `~` or `~/` using the remote SFTP home directory (`canonicalize(".")`).
+    pub async fn expand_remote_path(&self, path: &str) -> String {
+        let trimmed = path.trim();
+        if trimmed == "~" {
+            return self.canonicalize(".").await.unwrap_or_else(|_| ".".to_string());
+        }
+        if let Some(rest) = trimmed.strip_prefix("~/") {
+            let home = self.canonicalize(".").await.unwrap_or_else(|_| ".".to_string());
+            return join_remote_path(&home, rest);
+        }
+        trimmed.to_string()
+    }
+
     /// Downloads a remote file or directory (recursively) to `local_dest`.
     /// If `local_dest` is an existing directory, the remote file/folder name is appended automatically.
     pub async fn download<F>(
@@ -201,13 +214,14 @@ impl SftpClient {
     where
         F: FnMut(&str, u64, Option<u64>),
     {
+        let remote_path = self.expand_remote_path(remote_path).await;
         let meta = self
             .sftp
-            .metadata(remote_path)
+            .metadata(&remote_path)
             .await
             .with_context(|| format!("Chemin distant introuvable : '{}'", remote_path))?;
 
-        let remote_name = remote_file_name(remote_path);
+        let remote_name = remote_file_name(&remote_path);
         let target = if local_dest.is_dir() {
             local_dest.join(&remote_name)
         } else {
@@ -217,14 +231,14 @@ impl SftpClient {
         let mut stats = TransferStats::default();
         if meta.file_type().is_dir() {
             self.download_dir_boxed(
-                remote_path.to_string(),
+                remote_path,
                 target.clone(),
                 &mut stats,
                 &mut on_progress,
             )
             .await?;
         } else {
-            self.download_file(remote_path, &target, meta.size, &mut stats, &mut on_progress)
+            self.download_file(&remote_path, &target, meta.size, &mut stats, &mut on_progress)
                 .await?;
         }
 
@@ -342,23 +356,31 @@ impl SftpClient {
             bail!("Fichier ou dossier local introuvable : '{}'", local_source.display());
         }
 
+        let canonical_local = std::fs::canonicalize(local_source).ok();
         let file_name = local_source
             .file_name()
+            .or_else(|| canonical_local.as_deref().and_then(|p| p.file_name()))
             .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("Nom de fichier local invalide : '{}'", local_source.display()))?;
+            .ok_or_else(|| anyhow!("Nom de fichier local invalide : '{}'", local_source.display()))?
+            .to_string();
 
-        // Check if remote_dest is an existing directory; if so, append local filename
-        let remote_is_dir = self
-            .sftp
-            .metadata(remote_dest)
-            .await
-            .map(|m| m.file_type().is_dir())
-            .unwrap_or(false);
+        let remote_dest = self.expand_remote_path(remote_dest).await;
+        // Convert any accidental Windows backslashes in remote Linux path to `/`
+        let remote_dest = remote_dest.replace('\\', "/");
+
+        // Check if remote_dest is an existing directory (or ends with '/'); if so, append local filename
+        let remote_is_dir = remote_dest.ends_with('/')
+            || self
+                .sftp
+                .metadata(&remote_dest)
+                .await
+                .map(|m| m.file_type().is_dir())
+                .unwrap_or(false);
 
         let target_remote = if remote_is_dir {
-            join_remote_path(remote_dest, file_name)
+            join_remote_path(&remote_dest, &file_name)
         } else {
-            remote_dest.to_string()
+            remote_dest
         };
 
         let mut stats = TransferStats::default();
@@ -531,8 +553,21 @@ pub fn default_download_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Resolves a user-entered local path, handling Windows Explorer quotes (`"C:\..."`),
+/// PowerShell drag-and-drop prefixes (`& '...'`), and leading `~`.
 pub fn resolve_local_path(input: &str) -> PathBuf {
-    expand_tilde(input)
+    let mut s = input.trim();
+    // PowerShell drag-and-drop often prefixes with `& `
+    if let Some(rest) = s.strip_prefix("& ") {
+        s = rest.trim();
+    }
+    // Strip matching surrounding double or single quotes (e.g. Windows "Copy as path")
+    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
+    {
+        s = &s[1..s.len() - 1];
+    }
+    expand_tilde(s)
 }
 
 pub fn format_size(bytes: u64) -> String {
@@ -609,6 +644,18 @@ mod tests {
 
         assert_eq!(remote_file_name("/home/gigi/photo.png"), "photo.png");
         assert_eq!(remote_file_name("/home/gigi/docs/"), "docs");
+    }
+
+    #[test]
+    fn windows_quoted_and_drag_drop_paths_are_cleaned() {
+        assert_eq!(
+            resolve_local_path(r#" "C:\Users\Gigi\Desktop\mon fichier.txt" "#),
+            PathBuf::from(r"C:\Users\Gigi\Desktop\mon fichier.txt")
+        );
+        assert_eq!(
+            resolve_local_path(r#"& 'C:\Users\Gigi\test.pdf'"#),
+            PathBuf::from(r"C:\Users\Gigi\test.pdf")
+        );
     }
 
     #[test]

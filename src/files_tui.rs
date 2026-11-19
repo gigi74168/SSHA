@@ -301,16 +301,31 @@ pub async fn run_files_tui(
             continue;
         }
 
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-            continue;
-        }
-
-        let should_quit = handle_file_key(&mut state, key, &client, &mut terminal).await?;
-        if should_quit {
-            break;
+        match event::read()? {
+            Event::Key(key) => {
+                if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                    continue;
+                }
+                let should_quit = handle_file_key(&mut state, key, &client, &mut terminal).await?;
+                if should_quit {
+                    break;
+                }
+            }
+            Event::Paste(text) => {
+                let cleaned = text.replace(['\r', '\n'], "");
+                match &mut state.modal {
+                    FileModal::Input { value, error, .. } => {
+                        value.push_str(&cleaned);
+                        *error = None;
+                    }
+                    FileModal::None => {
+                        state.input.push_str(&cleaned);
+                        state.slash_selected = 0;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
 
@@ -591,10 +606,11 @@ async fn execute_file_slash_command(
         }
         "/cd" => {
             if let Some(dest) = arg {
-                let target = if dest.starts_with('/') {
-                    dest.to_string()
+                let expanded = client.expand_remote_path(dest).await;
+                let target = if expanded.starts_with('/') {
+                    expanded
                 } else {
-                    join_remote_path(&state.cwd, dest)
+                    join_remote_path(&state.cwd, &expanded)
                 };
                 navigate_to(state, client, &target).await;
             } else {
@@ -701,6 +717,17 @@ async fn handle_input_modal_key(
     client: &SftpClient,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+    if ctrl && !alt && key.code == KeyCode::Char('u') {
+        if let FileModal::Input { value, error, .. } = &mut state.modal {
+            value.clear();
+            *error = None;
+        }
+        return Ok(());
+    }
+
     match key.code {
         KeyCode::Esc => {
             state.modal = FileModal::None;
@@ -713,7 +740,9 @@ async fn handle_input_modal_key(
             }
             return Ok(());
         }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        // On Windows AZERTY keyboards, AltGr (needed for `\`, `~`, `@`, `[`, `]`)
+        // is reported as CONTROL + ALT; allow it as a normal character.
+        KeyCode::Char(c) if !(ctrl && !alt) => {
             if let FileModal::Input { value, error, .. } = &mut state.modal {
                 value.push(c);
                 *error = None;
@@ -781,7 +810,7 @@ async fn handle_input_modal_key(
                     );
                 }
                 Err(e) => {
-                    state.set_status(StatusLevel::Error, format!("Échec téléchargement : {e}"));
+                    state.set_status(StatusLevel::Error, format!("Échec téléchargement : {e:#}"));
                 }
             }
         }
@@ -807,7 +836,7 @@ async fn handle_input_modal_key(
                     );
                 }
                 Err(e) => {
-                    state.set_status(StatusLevel::Error, format!("Échec envoi : {e}"));
+                    state.set_status(StatusLevel::Error, format!("Échec envoi : {e:#}"));
                 }
             }
         }
@@ -821,7 +850,7 @@ async fn handle_input_modal_key(
                         format!("Dossier '{}' créé.", trimmed),
                     );
                 }
-                Err(e) => state.set_status(StatusLevel::Error, format!("{e}")),
+                Err(e) => state.set_status(StatusLevel::Error, format!("{e:#}")),
             }
         }
         PromptKind::Rename { old_path, old_name } => {
@@ -834,7 +863,7 @@ async fn handle_input_modal_key(
                         format!("Renommé '{}' → '{}'.", old_name, trimmed),
                     );
                 }
-                Err(e) => state.set_status(StatusLevel::Error, format!("{e}")),
+                Err(e) => state.set_status(StatusLevel::Error, format!("{e:#}")),
             }
         }
     }
