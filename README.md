@@ -6,6 +6,19 @@ Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou cl
 
 ---
 
+## Captures d'écran
+
+### Liste des connexions enregistrées (`ssha`)
+![Liste des connexions SSH dans ssha](assets/screenshots/home.png)
+
+### Commandes rapides avec autocomplétion (`/new`, `/edit`, `/del`, `/test`...)
+![Menu des commandes slash dans ssha](assets/screenshots/slash-commands.png)
+
+### Ajout d'une nouvelle machine (`/new`)
+![Formulaire d'ajout d'une connexion SSH dans ssha](assets/screenshots/new-modal.png)
+
+---
+
 ## Fonctionnalités
 
 - **Interface 100 % CLI interactive (`ssha`)** :
