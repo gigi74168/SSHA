@@ -70,7 +70,7 @@ const SLASH_COMMANDS: &[SlashCommandDef] = &[
     SlashCommandDef {
         cmd: "/quit",
         usage: "/quit",
-        desc: "Quitter ssh-a",
+        desc: "Quitter ssha",
     },
 ];
 
@@ -960,7 +960,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let title = Line::from(vec![
         Span::styled(
-            " ssh-a ",
+            " ssha ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -1519,7 +1519,7 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .title(Span::styled(
-            " Aide — ssh-a ",
+            " Aide — ssha ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1541,7 +1541,7 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
         Line::from("    /connect [nom]   Se connecter immédiatement"),
         Line::from("    /test [nom]      Vérifier si le port SSH répond"),
         Line::from("    /help            Afficher cette aide"),
-        Line::from("    /quit            Quitter ssh-a"),
+        Line::from("    /quit            Quitter ssha"),
         Line::raw(""),
         Line::from(Span::styled(
             "  Raccourcis clavier :",
@@ -1561,9 +1561,9 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("    ssh-a <nom>      Connexion directe sans ouvrir le menu"),
-        Line::from("    ssh-a new        Assistant d'ajout en ligne de commande"),
-        Line::from("    ssh-a list       Lister les connexions enregistrées"),
+        Line::from("    ssha <nom>      Connexion directe sans ouvrir le menu"),
+        Line::from("    ssha new        Assistant d'ajout en ligne de commande"),
+        Line::from("    ssha list       Lister les connexions enregistrées"),
         Line::raw(""),
         Line::from(Span::styled(
             "  Appuie sur Esc ou Entrée pour fermer.",

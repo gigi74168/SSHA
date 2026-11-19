@@ -21,7 +21,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(code) => ExitCode::from(code as u8),
         Err(err) => {
-            eprintln!("\x1b[1;31m[ssh-a] Erreur :\x1b[0m {err:#}");
+            eprintln!("\x1b[1;31m[ssha] Erreur :\x1b[0m {err:#}");
             ExitCode::FAILURE
         }
     }
@@ -46,7 +46,7 @@ async fn run() -> Result<i32> {
         return cli::cmd_direct_connect(storage, &target).await;
     }
 
-    // Default mode: interactive 100% CLI interface (`ssh-a`)
+    // Default mode: interactive 100% CLI interface (`ssha`)
     let mut next_status: Option<(bool, String)> = None;
 
     loop {
@@ -84,7 +84,7 @@ async fn run() -> Result<i32> {
                 match ssh::connect_interactive(&host, Arc::clone(&storage)).await {
                     Ok(code) => {
                         eprintln!(
-                            "\n\x1b[1;36m[ssh-a]\x1b[0m Déconnecté de \x1b[1m{}\x1b[0m (code de sortie : {}).",
+                            "\n\x1b[1;36m[ssha]\x1b[0m Déconnecté de \x1b[1m{}\x1b[0m (code de sortie : {}).",
                             host.name, code
                         );
                         if !wait_return_to_menu()? {
@@ -96,7 +96,7 @@ async fn run() -> Result<i32> {
                         ));
                     }
                     Err(err) => {
-                        eprintln!("\n\x1b[1;31m[ssh-a] Échec de connexion :\x1b[0m {err:#}");
+                        eprintln!("\n\x1b[1;31m[ssha] Échec de connexion :\x1b[0m {err:#}");
                         if !wait_return_to_menu()? {
                             return Ok(1);
                         }
@@ -112,9 +112,9 @@ async fn run() -> Result<i32> {
 }
 
 /// Pauses cleanly after an SSH session ends so the user can read final output,
-/// then returns `true` to reopen the `ssh-a` menu or `false` to quit to the shell.
+/// then returns `true` to reopen the `ssha` menu or `false` to quit to the shell.
 fn wait_return_to_menu() -> Result<bool> {
-    eprint!("\x1b[2mAppuie sur Entrée pour revenir au menu ssh-a, ou 'q' pour quitter...\x1b[0m");
+    eprint!("\x1b[2mAppuie sur Entrée pour revenir au menu ssha, ou 'q' pour quitter...\x1b[0m");
     io::stderr().flush()?;
 
     enable_raw_mode()?;

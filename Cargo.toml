@@ -1,6 +1,6 @@
 [package]
-name = "ssh-a"
-version = "0.1.0"
+name = "ssha"
+version = "0.2.0"
 edition = "2021"
 description = "Gestionnaire de connexions SSH 100% CLI avec coffre-fort chiffré automatique (Windows & Linux)"
 license = "MIT"
@@ -9,7 +9,7 @@ keywords = ["ssh", "cli", "tui", "manager", "terminal"]
 categories = ["command-line-utilities"]
 
 [[bin]]
-name = "ssh-a"
+name = "ssha"
 path = "src/main.rs"
 
 [dependencies]

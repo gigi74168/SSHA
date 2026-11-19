@@ -16,11 +16,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            bin: target/release/ssh-a
-            asset: ssh-a-linux-x86_64
+            bin: target/release/ssha
+            asset: ssha-linux-x86_64
           - os: windows-latest
-            bin: target/release/ssh-a.exe
-            asset: ssh-a-windows-x86_64.exe
+            bin: target/release/ssha.exe
+            asset: ssha-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

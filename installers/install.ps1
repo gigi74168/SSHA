@@ -1,5 +1,5 @@
-# Installateur Windows 10 / 11 pour ssh-a
-# Installe ssh-a.exe dans %LOCALAPPDATA%\Programs\ssh-a et l'ajoute au PATH utilisateur.
+# Installateur Windows 10 / 11 pour ssha
+# Installe ssha.exe dans %LOCALAPPDATA%\Programs\ssha et l'ajoute au PATH utilisateur.
 
 [CmdletBinding()]
 param(
@@ -9,10 +9,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "gigi74168/SSHA"
-$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ssh-a"
-$DestExe = Join-Path $InstallDir "ssh-a.exe"
+$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ssha"
+$DestExe = Join-Path $InstallDir "ssha.exe"
 
-Write-Host "[ssh-a] Installation de ssh-a pour Windows..." -ForegroundColor Cyan
+Write-Host "[ssha] Installation de ssha pour Windows..." -ForegroundColor Cyan
 
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -34,9 +34,9 @@ $Installed = $false
 
 # 1. Reuse already-built local release binary if present
 if ($RepoRoot -and -not $Rebuild) {
-    $LocalExe = Join-Path $RepoRoot "target\release\ssh-a.exe"
+    $LocalExe = Join-Path $RepoRoot "target\release\ssha.exe"
     if (Test-Path $LocalExe) {
-        Write-Host "[ssh-a] Copie du binaire local : $LocalExe" -ForegroundColor Cyan
+        Write-Host "[ssha] Copie du binaire local : $LocalExe" -ForegroundColor Cyan
         Copy-Item -Path $LocalExe -Destination $DestExe -Force
         $Installed = $true
     }
@@ -44,14 +44,14 @@ if ($RepoRoot -and -not $Rebuild) {
 
 # 2. Build locally if inside repo and Cargo is available
 if (-not $Installed -and $RepoRoot -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    Write-Host "[ssh-a] Compilation de ssh-a en mode release (cela peut prendre 1-2 minutes)..." -ForegroundColor Cyan
+    Write-Host "[ssha] Compilation de ssha en mode release (cela peut prendre 1-2 minutes)..." -ForegroundColor Cyan
     Push-Location $RepoRoot
     try {
         & cargo build --release
         if ($LASTEXITCODE -ne 0) {
             throw "La compilation Cargo a échoué (code $LASTEXITCODE)."
         }
-        Copy-Item -Path (Join-Path $RepoRoot "target\release\ssh-a.exe") -Destination $DestExe -Force
+        Copy-Item -Path (Join-Path $RepoRoot "target\release\ssha.exe") -Destination $DestExe -Force
         $Installed = $true
     } finally {
         Pop-Location
@@ -60,8 +60,8 @@ if (-not $Installed -and $RepoRoot -and (Get-Command cargo -ErrorAction Silently
 
 # 3. Otherwise download prebuilt binary from GitHub Releases
 if (-not $Installed) {
-    $DownloadUrl = "https://github.com/$Repo/releases/latest/download/ssh-a-windows-x86_64.exe"
-    Write-Host "[ssh-a] Téléchargement de la dernière release Windows..." -ForegroundColor Cyan
+    $DownloadUrl = "https://github.com/$Repo/releases/latest/download/ssha-windows-x86_64.exe"
+    Write-Host "[ssha] Téléchargement de la dernière release Windows..." -ForegroundColor Cyan
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $DestExe -UseBasicParsing
@@ -114,5 +114,5 @@ if ($env:Path -notlike "*$InstallDir*") {
 }
 
 Write-Host ""
-Write-Host "[✓] ssh-a est installé dans : $DestExe" -ForegroundColor Green
-Write-Host "[✓] Ouvre PowerShell, CMD ou Windows Terminal et tape simplement : ssh-a" -ForegroundColor Green
+Write-Host "[✓] ssha est installé dans : $DestExe" -ForegroundColor Green
+Write-Host "[✓] Ouvre PowerShell, CMD ou Windows Terminal et tape simplement : ssha" -ForegroundColor Green

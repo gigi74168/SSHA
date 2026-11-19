@@ -1,6 +1,6 @@
-# ssh-a
+# ssha
 
-**`ssh-a`** est un gestionnaire de connexions SSH **100 % CLI** écrit en Rust, compatible **Windows 10 / 11** et **Linux** (Debian, Ubuntu, Arch, Fedora, etc.).
+**`ssha`** est un gestionnaire de connexions SSH **100 % CLI** écrit en Rust, compatible **Windows 10 / 11** et **Linux** (Debian, Ubuntu, Arch, Fedora, etc.).
 
 Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou clé SSH), puis reconnecte-toi instantanément sans retaper ton mot de passe — sans aucune dépendance externe (`sshpass` n'est pas nécessaire, le client SSH est 100 % natif en Rust).
 
@@ -8,11 +8,11 @@ Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou cl
 
 ## Fonctionnalités
 
-- **Interface 100 % CLI interactive (`ssh-a`)** :
+- **Interface 100 % CLI interactive (`ssha`)** :
   - Liste filtrable en temps réel (tape un nom, une IP ou un groupe)
   - Commandes slash intégrées avec autocomplétion (`Tab`) : `/new`, `/edit`, `/del`, `/connect`, `/test`, `/help`, `/quit`
   - Raccourcis clavier rapides (`↑`/`↓`, `Entrée`, `Ctrl+N`, `Ctrl+E`, `Ctrl+D`, `Ctrl+T`, `Esc`)
-- **Connexion directe** : `ssh-a mon-pc` te connecte sans même ouvrir le menu
+- **Connexion directe** : `ssha mon-pc` te connecte sans même ouvrir le menu
 - **Client SSH natif multiplateforme** (`russh`) :
   - Authentification par **mot de passe** (incluant `keyboard-interactive` / PAM) ou **clé privée SSH** (Ed25519, RSA, ECDSA + passphrase optionnelle)
   - PTY interactif complet (couleurs, `vim`, `nano`, `htop`, `tmux`, redimensionnement automatique de la fenêtre, AltGr sur claviers AZERTY Windows)
@@ -21,7 +21,7 @@ Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou cl
   - Tes connexions et mots de passe sont chiffrés dans `vault.enc` en **AES-256-GCM**
   - Clé générée et gérée automatiquement par le logiciel (**aucun mot de passe maître à gérer**) :
     - **Windows 10/11** : clé protégée par **Windows DPAPI** (liée à ta session utilisateur Windows)
-    - **Linux** : clé locale protégée en permissions strictes `0600` dans `~/.config/ssh-a/`
+    - **Linux** : clé locale protégée en permissions strictes `0600` dans `~/.config/ssha/`
 
 ---
 
@@ -39,7 +39,7 @@ Double-clique sur `installers\install.bat` ou lance dans PowerShell :
 ```powershell
 .\installers\install.ps1
 ```
-L'installateur copie `ssh-a.exe` dans `%LOCALAPPDATA%\Programs\ssh-a` et l'ajoute automatiquement à ton `PATH` utilisateur (aucun droit administrateur requis).
+L'installateur copie `ssha.exe` dans `%LOCALAPPDATA%\Programs\ssha` et l'ajoute automatiquement à ton `PATH` utilisateur (aucun droit administrateur requis).
 
 ### Linux (Debian, Ubuntu, Arch, Fedora, etc.)
 
@@ -65,7 +65,7 @@ cargo install --path .
 
 ### 1. Lancer l'interface interactive
 ```bash
-ssh-a
+ssha
 ```
 
 Dans l'interface :
@@ -75,12 +75,12 @@ Dans l'interface :
 
 ### 2. Commandes directes depuis le terminal
 ```bash
-ssh-a mon-pc          # Connexion directe à "mon-pc"
-ssh-a new             # Assistant d'ajout en ligne de commande
-ssh-a list            # Lister toutes les connexions enregistrées
-ssh-a test mon-pc     # Tester la joignabilité TCP + latence
-ssh-a rm mon-pc       # Supprimer une connexion
-ssh-a info            # Afficher l'emplacement du coffre-fort chiffré
+ssha mon-pc          # Connexion directe à "mon-pc"
+ssha new             # Assistant d'ajout en ligne de commande
+ssha list            # Lister toutes les connexions enregistrées
+ssha test mon-pc     # Tester la joignabilité TCP + latence
+ssha rm mon-pc       # Supprimer une connexion
+ssha info            # Afficher l'emplacement du coffre-fort chiffré
 ```
 
 ---
@@ -89,8 +89,8 @@ ssh-a info            # Afficher l'emplacement du coffre-fort chiffré
 
 | Système | Coffre-fort chiffré (`vault.enc`) |
 |---|---|
-| **Windows 10/11** | `%APPDATA%\ssh-a\config\` |
-| **Linux** | `~/.config/ssh-a/` |
+| **Windows 10/11** | `%APPDATA%\ssha\config\` |
+| **Linux** | `~/.config/ssha/` |
 
 *(Tu peux aussi personnaliser le dossier via la variable d'environnement `SSHA_CONFIG_DIR`.)*
 

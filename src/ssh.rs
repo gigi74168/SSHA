@@ -97,7 +97,7 @@ impl client::Handler for SshClientHandler {
 
         // Trust On First Use (TOFU)
         eprintln!(
-            "\x1b[2m[ssh-a] Nouvelle empreinte enregistrée pour {} ({}, {})\x1b[0m",
+            "\x1b[2m[ssha] Nouvelle empreinte enregistrée pour {} ({}, {})\x1b[0m",
             self.host_id, algorithm, fingerprint
         );
         known.insert(
@@ -126,7 +126,7 @@ pub async fn test_tcp_connection(host: &str, port: u16) -> Result<Duration> {
 /// Establishes an interactive SSH terminal session with automatic authentication.
 pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Result<u32> {
     eprintln!(
-        "\x1b[1;36m[ssh-a]\x1b[0m Connexion à \x1b[1m{}\x1b[0m ({})...",
+        "\x1b[1;36m[ssha]\x1b[0m Connexion à \x1b[1m{}\x1b[0m ({})...",
         host.name,
         host.endpoint_display()
     );

@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ssh-a",
+    name = "ssha",
     version,
     about = "Gestionnaire de connexions SSH 100% CLI avec coffre-fort chiffré automatique",
-    long_about = "Lance `ssh-a` sans argument pour ouvrir l'interface interactive (avec /new, /edit, /del, recherche live),\nou passe directement le nom d'une machine (`ssh-a mon-pc`) pour t'y connecter instantanément."
+    long_about = "Lance `ssha` sans argument pour ouvrir l'interface interactive (avec /new, /edit, /del, recherche live),\nou passe directement le nom d'une machine (`ssha mon-pc`) pour t'y connecter instantanément."
 )]
 pub struct Cli {
     /// Nom d'une connexion enregistrée pour s'y connecter directement
@@ -88,7 +88,7 @@ pub struct NewArgs {
 pub fn cmd_new(storage: &Storage, args: NewArgs) -> Result<()> {
     let mut vault = storage.load_vault()?;
 
-    println!("\x1b[1;36m[ssh-a]\x1b[0m Ajout d'une nouvelle connexion SSH\n");
+    println!("\x1b[1;36m[ssha]\x1b[0m Ajout d'une nouvelle connexion SSH\n");
 
     let name = match args.name {
         Some(n) => n.trim().to_string(),
@@ -203,7 +203,7 @@ pub fn cmd_new(storage: &Storage, args: NewArgs) -> Result<()> {
         "\n\x1b[1;32m✓\x1b[0m Connexion '\x1b[1m{}\x1b[0m' enregistrée et chiffrée.",
         name
     );
-    println!("  Connecte-toi avec : \x1b[1;36mssh-a {}\x1b[0m (ou simplement \x1b[1;36mssh-a\x1b[0m)", name);
+    println!("  Connecte-toi avec : \x1b[1;36mssha {}\x1b[0m (ou simplement \x1b[1;36mssha\x1b[0m)", name);
     Ok(())
 }
 
@@ -211,7 +211,7 @@ pub fn cmd_list(storage: &Storage) -> Result<()> {
     let vault = storage.load_vault()?;
     if vault.hosts.is_empty() {
         println!("Aucune connexion SSH enregistrée.");
-        println!("Lance \x1b[1;36mssh-a\x1b[0m puis tape \x1b[1;33m/new\x1b[0m (ou \x1b[1;36mssh-a new\x1b[0m) pour en ajouter une.");
+        println!("Lance \x1b[1;36mssha\x1b[0m puis tape \x1b[1;33m/new\x1b[0m (ou \x1b[1;36mssha new\x1b[0m) pour en ajouter une.");
         return Ok(());
     }
 
@@ -264,7 +264,7 @@ pub async fn cmd_test(storage: &Storage, name: &str) -> Result<()> {
     };
 
     print!(
-        "[ssh-a] Test TCP vers {} ({}:{})... ",
+        "[ssha] Test TCP vers {} ({}:{})... ",
         host.name, host.host, host.port
     );
     io::stdout().flush()?;
@@ -283,7 +283,7 @@ pub async fn cmd_test(storage: &Storage, name: &str) -> Result<()> {
 
 pub fn cmd_info(storage: &Storage) -> Result<()> {
     let vault = storage.load_vault()?;
-    println!("\x1b[1;36mssh-a\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
+    println!("\x1b[1;36mssha\x1b[0m v{}", env!("CARGO_PKG_VERSION"));
     println!("  Dossier config   : {}", storage.config_dir().display());
     println!("  Coffre-fort      : {}", storage.vault_path().display());
     println!("  Empreintes SSH   : {}", storage.known_hosts_path().display());
@@ -296,7 +296,7 @@ pub async fn cmd_direct_connect(storage: Arc<Storage>, name: &str) -> Result<i32
     let mut vault = storage.load_vault()?;
     let Some(host) = vault.find_by_name(name).cloned() else {
         bail!(
-            "Connexion '{}' introuvable. Lance `ssh-a list` pour voir tes machines enregistrées.",
+            "Connexion '{}' introuvable. Lance `ssha list` pour voir tes machines enregistrées.",
             name
         );
     };

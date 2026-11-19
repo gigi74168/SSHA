@@ -17,7 +17,7 @@ impl Storage {
         let config_dir = if let Ok(custom) = env::var("SSHA_CONFIG_DIR") {
             PathBuf::from(custom)
         } else {
-            let dirs = ProjectDirs::from("", "", "ssh-a").ok_or_else(|| {
+            let dirs = ProjectDirs::from("", "", "ssha").ok_or_else(|| {
                 anyhow!("Impossible de déterminer le dossier de configuration utilisateur.")
             })?;
             dirs.config_dir().to_path_buf()

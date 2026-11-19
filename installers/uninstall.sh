@@ -7,7 +7,7 @@ if [ "${1:-}" = "--purge" ]; then
 fi
 
 REMOVED=0
-for candidate in "/usr/local/bin/ssh-a" "$HOME/.local/bin/ssh-a"; do
+for candidate in "/usr/local/bin/ssha" "$HOME/.local/bin/ssha"; do
     if [ -f "$candidate" ]; then
         rm -f "$candidate"
         printf '\033[1;32m[✓]\033[0m Supprimé : %s\n' "$candidate"
@@ -16,10 +16,10 @@ for candidate in "/usr/local/bin/ssh-a" "$HOME/.local/bin/ssh-a"; do
 done
 
 if [ "$REMOVED" -eq 0 ]; then
-    printf '\033[1;33m[!]\033[0m Aucune installation de ssh-a trouvée dans /usr/local/bin ou ~/.local/bin.\n'
+    printf '\033[1;33m[!]\033[0m Aucune installation de ssha trouvée dans /usr/local/bin ou ~/.local/bin.\n'
 fi
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ssh-a"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ssha"
 if [ "$PURGE" -eq 1 ] && [ -d "$CONFIG_DIR" ]; then
     rm -rf "$CONFIG_DIR"
     printf '\033[1;32m[✓]\033[0m Coffre-fort supprimé : %s\n' "$CONFIG_DIR"

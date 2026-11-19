@@ -1,11 +1,11 @@
-# Désinstallateur Windows 10 / 11 pour ssh-a
+# Désinstallateur Windows 10 / 11 pour ssha
 [CmdletBinding()]
 param(
     [switch]$Purge
 )
 
 $ErrorActionPreference = "Stop"
-$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ssh-a"
+$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ssha"
 
 if (Test-Path $InstallDir) {
     Remove-Item -Path $InstallDir -Recurse -Force
@@ -24,7 +24,7 @@ if ($UserPath) {
     Write-Host "[✓] PATH utilisateur nettoyé." -ForegroundColor Green
 }
 
-$ConfigDir = Join-Path $env:APPDATA "ssh-a"
+$ConfigDir = Join-Path $env:APPDATA "ssha"
 if ($Purge -and (Test-Path $ConfigDir)) {
     Remove-Item -Path $ConfigDir -Recurse -Force
     Write-Host "[✓] Coffre-fort supprimé : $ConfigDir" -ForegroundColor Green

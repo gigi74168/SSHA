@@ -2,9 +2,9 @@
 set -euo pipefail
 
 REPO="gigi74168/SSHA"
-BIN_NAME="ssh-a"
+BIN_NAME="ssha"
 
-info()  { printf '\033[1;36m[ssh-a]\033[0m %s\n' "$*"; }
+info()  { printf '\033[1;36m[ssha]\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m[✓]\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 error() { printf '\033[1;31m[✗]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -25,13 +25,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
 REPO_ROOT=""
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/../Cargo.toml" ]; then
     REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-elif [ -f "./Cargo.toml" ] && grep -q 'name = "ssh-a"' ./Cargo.toml 2>/dev/null; then
+elif [ -f "./Cargo.toml" ] && grep -q 'name = "ssha"' ./Cargo.toml 2>/dev/null; then
     REPO_ROOT="$(pwd)"
 fi
 
 install_from_local_build() {
     command -v cargo >/dev/null 2>&1 || error "Rust/Cargo n'est pas installé. Installe-le via https://rustup.rs puis relance ce script."
-    info "Compilation de ssh-a en mode release depuis $REPO_ROOT..."
+    info "Compilation de ssha en mode release depuis $REPO_ROOT..."
     (cd "$REPO_ROOT" && cargo build --release)
     cp "$REPO_ROOT/target/release/$BIN_NAME" "$DEST"
     chmod 755 "$DEST"
@@ -40,8 +40,8 @@ install_from_local_build() {
 install_from_release() {
     ARCH="$(uname -m)"
     case "$ARCH" in
-        x86_64|amd64) ASSET="ssh-a-linux-x86_64" ;;
-        aarch64|arm64) ASSET="ssh-a-linux-aarch64" ;;
+        x86_64|amd64) ASSET="ssha-linux-x86_64" ;;
+        aarch64|arm64) ASSET="ssha-linux-aarch64" ;;
         *) error "Architecture non supportée pour les binaires précompilés : $ARCH. Compile depuis les sources avec cargo." ;;
     esac
 
@@ -90,7 +90,7 @@ add_to_path_file() {
     local rc_file="$1"
     local line="$2"
     if [ -f "$rc_file" ] && ! grep -Fq "$INSTALL_DIR" "$rc_file"; then
-        printf '\n# Ajouté par l'\''installateur ssh-a\n%s\n' "$line" >> "$rc_file"
+        printf '\n# Ajouté par l'\''installateur ssha\n%s\n' "$line" >> "$rc_file"
         info "PATH mis à jour dans $rc_file"
     fi
 }
@@ -105,9 +105,9 @@ case ":$PATH:" in
             touch "$FISH_CFG"
             add_to_path_file "$FISH_CFG" "fish_add_path $INSTALL_DIR"
         fi
-        warn "Ouvre un nouveau terminal (ou exécute: export PATH=\"$INSTALL_DIR:\$PATH\") pour utiliser 'ssh-a' partout."
+        warn "Ouvre un nouveau terminal (ou exécute: export PATH=\"$INSTALL_DIR:\$PATH\") pour utiliser 'ssha' partout."
         ;;
 esac
 
-ok "ssh-a est installé dans : $DEST"
-ok "Tu peux maintenant lancer simplement : ssh-a"
+ok "ssha est installé dans : $DEST"
+ok "Tu peux maintenant lancer simplement : ssha"
