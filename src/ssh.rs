@@ -39,7 +39,7 @@ enum TerminalInput {
     Eof,
 }
 
-struct SshClientHandler {
+pub(crate) struct SshClientHandler {
     host_id: String,
     storage: Arc<Storage>,
 }
@@ -123,14 +123,11 @@ pub async fn test_tcp_connection(host: &str, port: u16) -> Result<Duration> {
     Ok(start.elapsed())
 }
 
-/// Establishes an interactive SSH terminal session with automatic authentication.
-pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Result<u32> {
-    eprintln!(
-        "\x1b[1;36m[ssha]\x1b[0m Connexion à \x1b[1m{}\x1b[0m ({})...",
-        host.name,
-        host.endpoint_display()
-    );
-
+/// Opens an authenticated SSH session reusable for interactive shells or SFTP.
+pub(crate) async fn connect_and_authenticate(
+    host: &SshHost,
+    storage: Arc<Storage>,
+) -> Result<client::Handle<SshClientHandler>> {
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
         keepalive_interval: Some(Duration::from_secs(30)),
@@ -165,6 +162,18 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
     })?;
 
     authenticate(&mut session, host).await?;
+    Ok(session)
+}
+
+/// Establishes an interactive SSH terminal session with automatic authentication.
+pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Result<u32> {
+    eprintln!(
+        "\x1b[1;36m[ssha]\x1b[0m Connexion à \x1b[1m{}\x1b[0m ({})...",
+        host.name,
+        host.endpoint_display()
+    );
+
+    let session = connect_and_authenticate(host, storage).await?;
 
     let mut channel = session
         .channel_open_session()

@@ -1,6 +1,8 @@
 mod cli;
 mod crypto;
+mod files_tui;
 mod models;
+mod sftp;
 mod ssh;
 mod storage;
 mod tui;
@@ -35,6 +37,19 @@ async fn run() -> Result<i32> {
         match cmd {
             Commands::New(args) => cli::cmd_new(&storage, args)?,
             Commands::List => cli::cmd_list(&storage)?,
+            Commands::Files { name, path } => {
+                cli::cmd_files(storage, &name, path.as_deref()).await?
+            }
+            Commands::Get {
+                name,
+                remote,
+                local,
+            } => cli::cmd_get(storage, &name, &remote, local.as_deref()).await?,
+            Commands::Put {
+                name,
+                local,
+                remote,
+            } => cli::cmd_put(storage, &name, &local, remote.as_deref()).await?,
             Commands::Rm { name, yes } => cli::cmd_rm(&storage, &name, yes)?,
             Commands::Test { name } => cli::cmd_test(&storage, &name).await?,
             Commands::Info => cli::cmd_info(&storage)?,
@@ -52,6 +67,27 @@ async fn run() -> Result<i32> {
     loop {
         match tui::run_tui(&storage, next_status.take())? {
             TuiAction::Quit => return Ok(0),
+            TuiAction::BrowseFiles(host) => {
+                if let Ok(mut vault) = storage.load_vault() {
+                    vault.mark_used(&host.name);
+                    let _ = storage.save_vault(&vault);
+                }
+
+                match files_tui::run_files_tui(&host, Arc::clone(&storage), None).await {
+                    Ok(()) => {
+                        next_status = Some((
+                            true,
+                            format!("Gestionnaire de fichiers '{}' fermé.", host.name),
+                        ));
+                    }
+                    Err(err) => {
+                        next_status = Some((
+                            false,
+                            format!("SFTP '{}' échoué : {err}", host.name),
+                        ));
+                    }
+                }
+            }
             TuiAction::TestHost(host) => {
                 match ssh::test_tcp_connection(&host.host, host.port).await {
                     Ok(rtt) => {

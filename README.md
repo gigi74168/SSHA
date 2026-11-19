@@ -23,10 +23,15 @@ Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou cl
 
 - **Interface 100 % CLI interactive (`ssha`)** :
   - Liste filtrable en temps réel (tape un nom, une IP ou un groupe)
-  - Commandes slash intégrées avec autocomplétion (`Tab`) : `/new`, `/edit`, `/del`, `/connect`, `/test`, `/help`, `/quit`
-  - Raccourcis clavier rapides (`↑`/`↓`, `Entrée`, `Ctrl+N`, `Ctrl+E`, `Ctrl+D`, `Ctrl+T`, `Esc`)
+  - Commandes slash intégrées avec autocomplétion (`Tab`) : `/new`, `/files`, `/edit`, `/del`, `/connect`, `/test`, `/help`, `/quit`
+  - Raccourcis clavier rapides (`↑`/`↓`, `Entrée`, `Ctrl+F`, `Ctrl+N`, `Ctrl+E`, `Ctrl+D`, `Ctrl+T`, `Esc`)
+- **Gestionnaire de fichiers à distance (SFTP intégré)** :
+  - Parcours des dossiers distants, filtrage live, fichiers cachés (`Ctrl+H`) et aperçu rapide des fichiers texte (`Entrée`)
+  - **Téléchargement** de fichiers ou dossiers complets (récursif) vers ton PC (`Ctrl+D` ou `/download` ou `ssha get`)
+  - **Envoi** de fichiers ou dossiers locaux vers le PC distant (`Ctrl+U` ou `/upload` ou `ssha put`)
+  - **Création de dossier** (`Ctrl+N` / `/mkdir`), **renommage** (`Ctrl+E` / `/rename`), **suppression** récursive sécurisée (`Ctrl+X` / `/del`)
 - **Connexion directe** : `ssha mon-pc` te connecte sans même ouvrir le menu
-- **Client SSH natif multiplateforme** (`russh`) :
+- **Client SSH & SFTP natif multiplateforme** (`russh` + `russh-sftp`) :
   - Authentification par **mot de passe** (incluant `keyboard-interactive` / PAM) ou **clé privée SSH** (Ed25519, RSA, ECDSA + passphrase optionnelle)
   - PTY interactif complet (couleurs, `vim`, `nano`, `htop`, `tmux`, redimensionnement automatique de la fenêtre, AltGr sur claviers AZERTY Windows)
   - Vérification des empreintes serveurs (TOFU) avec alerte en cas de changement suspect
@@ -83,17 +88,21 @@ ssha
 
 Dans l'interface :
 - Tape **`/new`** (ou appuie sur `Ctrl+N`) pour ajouter une nouvelle machine (ex: nom `mon-pc`, IP `192.168.1.192`, utilisateur, mot de passe SSH).
-- Utilise **`↑` / `↓`** (ou tape quelques lettres pour filtrer) puis appuie sur **`Entrée`** pour te connecter immédiatement.
-- Tape **`/edit`** (`Ctrl+E`) pour modifier une entrée, **`/del`** (`Ctrl+D`) pour la supprimer, **`/test`** (`Ctrl+T`) pour tester le port SSH, **`/help`** pour l'aide.
+- Utilise **`↑` / `↓`** (ou tape quelques lettres pour filtrer) puis appuie sur **`Entrée`** pour ouvrir le terminal SSH, ou **`Ctrl+F`** (ou `/files`) pour ouvrir le **gestionnaire de fichiers distant**.
+- Dans le gestionnaire de fichiers : `Entrée` ouvre un dossier ou affiche un aperçu texte, `Ctrl+D` (`/download`) télécharge sur ton PC, `Ctrl+U` (`/upload`) envoie un fichier local, `Ctrl+N` (`/mkdir`) crée un dossier, `Ctrl+E` (`/rename`) renomme, `Ctrl+X` (`/del`) supprime.
 
 ### 2. Commandes directes depuis le terminal
 ```bash
-ssha mon-pc          # Connexion directe à "mon-pc"
-ssha new             # Assistant d'ajout en ligne de commande
-ssha list            # Lister toutes les connexions enregistrées
-ssha test mon-pc     # Tester la joignabilité TCP + latence
-ssha rm mon-pc       # Supprimer une connexion
-ssha info            # Afficher l'emplacement du coffre-fort chiffré
+ssha mon-pc                                    # Connexion SSH directe à "mon-pc"
+ssha files mon-pc                              # Ouvrir l'explorateur de fichiers distant (SFTP)
+ssha get mon-pc /home/gigi/rapport.pdf         # Télécharger un fichier/dossier dans Téléchargements
+ssha get mon-pc /var/log/app.log ./app.log     # Télécharger vers un chemin local précis
+ssha put mon-pc ./mon-fichier.txt /tmp/        # Envoyer un fichier/dossier local vers le PC distant
+ssha new                                       # Assistant d'ajout en ligne de commande
+ssha list                                      # Lister toutes les connexions enregistrées
+ssha test mon-pc                               # Tester la joignabilité TCP + latence
+ssha rm mon-pc                                 # Supprimer une connexion
+ssha info                                      # Afficher l'emplacement du coffre-fort chiffré
 ```
 
 ---

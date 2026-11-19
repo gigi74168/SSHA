@@ -20,6 +20,7 @@ use std::time::Duration;
 
 pub enum TuiAction {
     Connect(SshHost),
+    BrowseFiles(SshHost),
     TestHost(SshHost),
     Quit,
 }
@@ -36,6 +37,11 @@ const SLASH_COMMANDS: &[SlashCommandDef] = &[
         cmd: "/new",
         usage: "/new",
         desc: "Ajouter une nouvelle connexion SSH",
+    },
+    SlashCommandDef {
+        cmd: "/files",
+        usage: "/files [nom]",
+        desc: "Gérer et télécharger les fichiers à distance (SFTP)",
     },
     SlashCommandDef {
         cmd: "/edit",
@@ -571,6 +577,14 @@ fn handle_main_key(
                 }
                 return Ok(None);
             }
+            KeyCode::Char('f') => {
+                if let Some(host) = app.selected_host() {
+                    return Ok(Some(TuiAction::BrowseFiles(host)));
+                } else {
+                    app.set_status(StatusLevel::Info, "Aucune connexion sélectionnée pour les fichiers.");
+                }
+                return Ok(None);
+            }
             KeyCode::Char('h') => {
                 app.modal = Modal::Help;
                 return Ok(None);
@@ -677,6 +691,7 @@ fn execute_slash_command(app: &mut AppState, _storage: &Storage) -> Result<Optio
     // Resolve partial slash command via highlighted suggestion if no exact match
     let resolved = match typed_cmd.as_str() {
         "/new" | "/add" | "/n" => "/new",
+        "/files" | "/sftp" | "/f" => "/files",
         "/edit" | "/e" => "/edit",
         "/del" | "/delete" | "/rm" | "/remove" => "/del",
         "/connect" | "/c" | "/open" => "/connect",
@@ -713,6 +728,17 @@ fn execute_slash_command(app: &mut AppState, _storage: &Storage) -> Result<Optio
                 }
             }
             app.modal = Modal::Form(form);
+        }
+        "/files" => {
+            let target = match arg {
+                Some(name) => app.vault.find_by_name(name).cloned(),
+                None => app.selected_host(),
+            };
+            if let Some(host) = target {
+                return Ok(Some(TuiAction::BrowseFiles(host)));
+            } else {
+                app.set_status(StatusLevel::Error, "Connexion introuvable pour /files.");
+            }
         }
         "/edit" => {
             let target = match arg {
@@ -1262,17 +1288,17 @@ fn draw_slash_popup(frame: &mut Frame, input_area: Rect, app: &AppState) {
 fn draw_footer(frame: &mut Frame, area: Rect) {
     let hints = Line::from(vec![
         Span::styled(" Entrée", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Connecter  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Naviguer  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("/new / Ctrl+N", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(" SSH  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Ctrl+F", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(" Fichiers  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("/new", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(" Ajouter  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Ctrl+E", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(" Éditer  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Ctrl+D", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Supprimer  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Suppr  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Ctrl+T", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Tester  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Test  ", Style::default().fg(Color::DarkGray)),
         Span::styled("/help", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(" Aide  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Esc", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -1514,7 +1540,7 @@ fn draw_delete_modal(frame: &mut Frame, area: Rect, host_name: &str, endpoint: &
 }
 
 fn draw_help_modal(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(72, 22, area);
+    let popup = centered_rect(76, 25, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -1536,12 +1562,12 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("    /new             Ajouter une nouvelle machine SSH"),
+        Line::from("    /files [nom]     Ouvrir le gestionnaire de fichiers distant (SFTP)"),
         Line::from("    /edit [nom]      Modifier la machine sélectionnée"),
         Line::from("    /del [nom]       Supprimer une machine"),
         Line::from("    /connect [nom]   Se connecter immédiatement"),
         Line::from("    /test [nom]      Vérifier si le port SSH répond"),
-        Line::from("    /help            Afficher cette aide"),
-        Line::from("    /quit            Quitter ssha"),
+        Line::from("    /help            Afficher cette aide   │  /quit  Quitter"),
         Line::raw(""),
         Line::from(Span::styled(
             "  Raccourcis clavier :",
@@ -1551,6 +1577,7 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
         )),
         Line::from("    ↑ / ↓            Sélectionner une machine"),
         Line::from("    Entrée           Lancer la connexion SSH"),
+        Line::from("    Ctrl+F           Gérer / télécharger les fichiers distants (SFTP)"),
         Line::from("    Ctrl+N / F2      Ajouter (/new)"),
         Line::from("    Ctrl+E           Modifier   │  Ctrl+D   Supprimer"),
         Line::from("    Ctrl+T           Tester     │  Esc      Effacer / Quitter"),
@@ -1561,9 +1588,10 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("    ssha <nom>      Connexion directe sans ouvrir le menu"),
-        Line::from("    ssha new        Assistant d'ajout en ligne de commande"),
-        Line::from("    ssha list       Lister les connexions enregistrées"),
+        Line::from("    ssha <nom>                        Connexion SSH directe"),
+        Line::from("    ssha files <nom> [chemin]         Explorateur de fichiers distant"),
+        Line::from("    ssha get <nom> <distant> [local]  Télécharger un fichier/dossier"),
+        Line::from("    ssha put <nom> <local> [distant]  Envoyer un fichier/dossier"),
         Line::raw(""),
         Line::from(Span::styled(
             "  Appuie sur Esc ou Entrée pour fermer.",

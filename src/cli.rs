@@ -1,5 +1,7 @@
 use crate::crypto::protection_summary;
+use crate::files_tui;
 use crate::models::{format_relative_time, AuthMethod, SshHost};
+use crate::sftp::{self, SftpClient};
 use crate::ssh;
 use crate::storage::Storage;
 use anyhow::{bail, Result};
@@ -13,7 +15,7 @@ use std::sync::Arc;
     name = "ssha",
     version,
     about = "Gestionnaire de connexions SSH 100% CLI avec coffre-fort chiffré automatique",
-    long_about = "Lance `ssha` sans argument pour ouvrir l'interface interactive (avec /new, /edit, /del, recherche live),\nou passe directement le nom d'une machine (`ssha mon-pc`) pour t'y connecter instantanément."
+    long_about = "Lance `ssha` sans argument pour ouvrir l'interface interactive (avec /new, /files, /edit, /del, recherche live),\nou passe directement le nom d'une machine (`ssha mon-pc`) pour t'y connecter instantanément."
 )]
 pub struct Cli {
     /// Nom d'une connexion enregistrée pour s'y connecter directement
@@ -33,6 +35,37 @@ pub enum Commands {
     /// Lister toutes les connexions enregistrées
     #[command(visible_alias = "ls")]
     List,
+
+    /// Ouvrir le gestionnaire de fichiers distant (SFTP) sur une machine
+    #[command(visible_alias = "sftp")]
+    Files {
+        /// Nom / alias de la connexion
+        name: String,
+        /// Dossier distant initial (optionnel)
+        path: Option<String>,
+    },
+
+    /// Télécharger un fichier ou dossier depuis une machine distante
+    #[command(visible_aliases = ["download", "dl"])]
+    Get {
+        /// Nom / alias de la connexion
+        name: String,
+        /// Chemin du fichier ou dossier sur la machine distante
+        remote: String,
+        /// Chemin de destination local (défaut: dossier Téléchargements)
+        local: Option<String>,
+    },
+
+    /// Envoyer un fichier ou dossier local vers une machine distante
+    #[command(visible_aliases = ["upload", "up"])]
+    Put {
+        /// Nom / alias de la connexion
+        name: String,
+        /// Chemin du fichier ou dossier local à envoyer
+        local: String,
+        /// Dossier ou chemin de destination sur la machine distante (défaut: dossier home distant)
+        remote: Option<String>,
+    },
 
     /// Supprimer une connexion enregistrée
     #[command(visible_aliases = ["delete", "del"])]
@@ -306,6 +339,150 @@ pub async fn cmd_direct_connect(storage: Arc<Storage>, name: &str) -> Result<i32
 
     let code = ssh::connect_interactive(&host, storage).await?;
     Ok(code as i32)
+}
+
+pub async fn cmd_files(
+    storage: Arc<Storage>,
+    name: &str,
+    initial_path: Option<&str>,
+) -> Result<()> {
+    let mut vault = storage.load_vault()?;
+    let Some(host) = vault.find_by_name(name).cloned() else {
+        bail!(
+            "Connexion '{}' introuvable. Lance `ssha list` pour voir tes machines enregistrées.",
+            name
+        );
+    };
+
+    vault.mark_used(&host.name);
+    let _ = storage.save_vault(&vault);
+
+    files_tui::run_files_tui(&host, storage, initial_path).await
+}
+
+pub async fn cmd_get(
+    storage: Arc<Storage>,
+    name: &str,
+    remote: &str,
+    local: Option<&str>,
+) -> Result<()> {
+    let mut vault = storage.load_vault()?;
+    let Some(host) = vault.find_by_name(name).cloned() else {
+        bail!(
+            "Connexion '{}' introuvable. Lance `ssha list` pour voir tes machines enregistrées.",
+            name
+        );
+    };
+
+    vault.mark_used(&host.name);
+    let _ = storage.save_vault(&vault);
+
+    println!(
+        "\x1b[1;36m[ssha]\x1b[0m Connexion SFTP à \x1b[1m{}\x1b[0m ({})...",
+        host.name,
+        host.endpoint_display()
+    );
+    let client = SftpClient::connect(&host, storage).await?;
+
+    let local_dest = match local {
+        Some(p) => sftp::resolve_local_path(p),
+        None => sftp::default_download_dir(),
+    };
+
+    let result = client
+        .download(remote, &local_dest, |fname, done, total| {
+            if let Some(t) = total.filter(|&t| t > 0) {
+                let pct = ((done as f64 / t as f64) * 100.0).min(100.0);
+                eprint!(
+                    "\r\x1b[2K  ↓ {} : {} / {} ({:.0}%)",
+                    fname,
+                    sftp::format_size(done),
+                    sftp::format_size(t),
+                    pct
+                );
+            } else {
+                eprint!("\r\x1b[2K  ↓ {} : {}", fname, sftp::format_size(done));
+            }
+            let _ = io::stderr().flush();
+        })
+        .await;
+
+    eprintln!();
+    client.close().await;
+
+    let (saved_path, stats) = result?;
+    println!(
+        "\x1b[1;32m✓\x1b[0m Téléchargement terminé ({} fichier(s), {}) → \x1b[1m{}\x1b[0m",
+        stats.files,
+        sftp::format_size(stats.bytes),
+        saved_path.display()
+    );
+    Ok(())
+}
+
+pub async fn cmd_put(
+    storage: Arc<Storage>,
+    name: &str,
+    local: &str,
+    remote: Option<&str>,
+) -> Result<()> {
+    let mut vault = storage.load_vault()?;
+    let Some(host) = vault.find_by_name(name).cloned() else {
+        bail!(
+            "Connexion '{}' introuvable. Lance `ssha list` pour voir tes machines enregistrées.",
+            name
+        );
+    };
+
+    vault.mark_used(&host.name);
+    let _ = storage.save_vault(&vault);
+
+    let local_src = sftp::resolve_local_path(local);
+    if !local_src.exists() {
+        bail!("Fichier ou dossier local introuvable : '{}'", local_src.display());
+    }
+
+    println!(
+        "\x1b[1;36m[ssha]\x1b[0m Connexion SFTP à \x1b[1m{}\x1b[0m ({})...",
+        host.name,
+        host.endpoint_display()
+    );
+    let client = SftpClient::connect(&host, storage).await?;
+
+    let remote_dest = match remote {
+        Some(r) => r.to_string(),
+        None => client.canonicalize(".").await.unwrap_or_else(|_| ".".to_string()),
+    };
+
+    let result = client
+        .upload(&local_src, &remote_dest, |fname, done, total| {
+            if let Some(t) = total.filter(|&t| t > 0) {
+                let pct = ((done as f64 / t as f64) * 100.0).min(100.0);
+                eprint!(
+                    "\r\x1b[2K  ↑ {} : {} / {} ({:.0}%)",
+                    fname,
+                    sftp::format_size(done),
+                    sftp::format_size(t),
+                    pct
+                );
+            } else {
+                eprint!("\r\x1b[2K  ↑ {} : {}", fname, sftp::format_size(done));
+            }
+            let _ = io::stderr().flush();
+        })
+        .await;
+
+    eprintln!();
+    client.close().await;
+
+    let (saved_remote, stats) = result?;
+    println!(
+        "\x1b[1;32m✓\x1b[0m Envoi terminé ({} fichier(s), {}) → \x1b[1m{}\x1b[0m",
+        stats.files,
+        sftp::format_size(stats.bytes),
+        saved_remote
+    );
+    Ok(())
 }
 
 fn prompt_required(label: &str) -> Result<String> {
