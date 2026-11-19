@@ -1,0 +1,102 @@
+# ssh-a
+
+**`ssh-a`** est un gestionnaire de connexions SSH **100 % CLI** écrit en Rust, compatible **Windows 10 / 11** et **Linux** (Debian, Ubuntu, Arch, Fedora, etc.).
+
+Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou clé SSH), puis reconnecte-toi instantanément sans retaper ton mot de passe — sans aucune dépendance externe (`sshpass` n'est pas nécessaire, le client SSH est 100 % natif en Rust).
+
+---
+
+## Fonctionnalités
+
+- **Interface 100 % CLI interactive (`ssh-a`)** :
+  - Liste filtrable en temps réel (tape un nom, une IP ou un groupe)
+  - Commandes slash intégrées avec autocomplétion (`Tab`) : `/new`, `/edit`, `/del`, `/connect`, `/test`, `/help`, `/quit`
+  - Raccourcis clavier rapides (`↑`/`↓`, `Entrée`, `Ctrl+N`, `Ctrl+E`, `Ctrl+D`, `Ctrl+T`, `Esc`)
+- **Connexion directe** : `ssh-a mon-pc` te connecte sans même ouvrir le menu
+- **Client SSH natif multiplateforme** (`russh`) :
+  - Authentification par **mot de passe** (incluant `keyboard-interactive` / PAM) ou **clé privée SSH** (Ed25519, RSA, ECDSA + passphrase optionnelle)
+  - PTY interactif complet (couleurs, `vim`, `nano`, `htop`, `tmux`, redimensionnement automatique de la fenêtre, AltGr sur claviers AZERTY Windows)
+  - Vérification des empreintes serveurs (TOFU) avec alerte en cas de changement suspect
+- **Chiffrement automatique transparent** :
+  - Tes connexions et mots de passe sont chiffrés dans `vault.enc` en **AES-256-GCM**
+  - Clé générée et gérée automatiquement par le logiciel (**aucun mot de passe maître à gérer**) :
+    - **Windows 10/11** : clé protégée par **Windows DPAPI** (liée à ta session utilisateur Windows)
+    - **Linux** : clé locale protégée en permissions strictes `0600` dans `~/.config/ssh-a/`
+
+---
+
+## Installation (une seule fois, accessible partout)
+
+### Windows 10 & 11 (PowerShell)
+
+**Depuis GitHub Releases (sans avoir besoin de Rust) :**
+```powershell
+irm https://raw.githubusercontent.com/gigi74168/SSHA/main/installers/install.ps1 | iex
+```
+
+**Ou depuis ce dépôt cloné :**
+Double-clique sur `installers\install.bat` ou lance dans PowerShell :
+```powershell
+.\installers\install.ps1
+```
+L'installateur copie `ssh-a.exe` dans `%LOCALAPPDATA%\Programs\ssh-a` et l'ajoute automatiquement à ton `PATH` utilisateur (aucun droit administrateur requis).
+
+### Linux (Debian, Ubuntu, Arch, Fedora, etc.)
+
+**Depuis GitHub Releases :**
+```bash
+curl -fsSL https://raw.githubusercontent.com/gigi74168/SSHA/main/installers/install.sh | bash
+```
+
+**Ou depuis ce dépôt cloné :**
+```bash
+chmod +x installers/install.sh
+./installers/install.sh
+```
+
+**Ou directement avec Cargo (Linux & Windows) :**
+```bash
+cargo install --path .
+```
+
+---
+
+## Utilisation
+
+### 1. Lancer l'interface interactive
+```bash
+ssh-a
+```
+
+Dans l'interface :
+- Tape **`/new`** (ou appuie sur `Ctrl+N`) pour ajouter une nouvelle machine (ex: nom `mon-pc`, IP `192.168.1.192`, utilisateur, mot de passe SSH).
+- Utilise **`↑` / `↓`** (ou tape quelques lettres pour filtrer) puis appuie sur **`Entrée`** pour te connecter immédiatement.
+- Tape **`/edit`** (`Ctrl+E`) pour modifier une entrée, **`/del`** (`Ctrl+D`) pour la supprimer, **`/test`** (`Ctrl+T`) pour tester le port SSH, **`/help`** pour l'aide.
+
+### 2. Commandes directes depuis le terminal
+```bash
+ssh-a mon-pc          # Connexion directe à "mon-pc"
+ssh-a new             # Assistant d'ajout en ligne de commande
+ssh-a list            # Lister toutes les connexions enregistrées
+ssh-a test mon-pc     # Tester la joignabilité TCP + latence
+ssh-a rm mon-pc       # Supprimer une connexion
+ssh-a info            # Afficher l'emplacement du coffre-fort chiffré
+```
+
+---
+
+## Emplacement des fichiers
+
+| Système | Coffre-fort chiffré (`vault.enc`) |
+|---|---|
+| **Windows 10/11** | `%APPDATA%\ssh-a\config\` |
+| **Linux** | `~/.config/ssh-a/` |
+
+*(Tu peux aussi personnaliser le dossier via la variable d'environnement `SSHA_CONFIG_DIR`.)*
+
+---
+
+## Désinstallation
+
+- **Windows** : `.\installers\uninstall.ps1` (ajouter `-Purge` pour supprimer aussi le coffre-fort)
+- **Linux** : `./installers/uninstall.sh` (ajouter `--purge` pour supprimer aussi le coffre-fort)

@@ -1,0 +1,47 @@
+[package]
+name = "ssh-a"
+version = "0.1.0"
+edition = "2021"
+description = "Gestionnaire de connexions SSH 100% CLI avec coffre-fort chiffré automatique (Windows & Linux)"
+license = "MIT"
+repository = "https://github.com/gigi74168/SSHA"
+keywords = ["ssh", "cli", "tui", "manager", "terminal"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "ssh-a"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.11"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+directories = "6.0"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "std", "layout-cache"] }
+rpassword = "7.4"
+russh = { version = "0.65", default-features = false, features = ["flate2", "ring", "rsa"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time", "signal"] }
+zeroize = { version = "1.8", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+] }
+
+[dev-dependencies]
+tempfile = "3.19"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
