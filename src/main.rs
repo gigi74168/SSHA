@@ -6,6 +6,7 @@ mod sftp;
 mod ssh;
 mod storage;
 mod tui;
+mod updater;
 
 use anyhow::Result;
 use clap::Parser;
@@ -31,6 +32,12 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<i32> {
     let cli = Cli::parse();
+
+    if let Some(Commands::Update { yes }) = cli.command {
+        updater::cmd_update(yes).await?;
+        return Ok(0);
+    }
+
     let storage = Arc::new(Storage::new()?);
 
     if let Some(cmd) = cli.command {
@@ -52,8 +59,14 @@ async fn run() -> Result<i32> {
             } => cli::cmd_put(storage, &name, &local, remote.as_deref()).await?,
             Commands::Rm { name, yes } => cli::cmd_rm(&storage, &name, yes)?,
             Commands::Test { name } => cli::cmd_test(&storage, &name).await?,
+            Commands::Update { .. } => unreachable!(),
             Commands::Info => cli::cmd_info(&storage)?,
         }
+        return Ok(0);
+    }
+
+    // Automatic update detection at startup (fast 2s timeout, prompts user if newer release exists)
+    if updater::check_and_prompt_startup().await {
         return Ok(0);
     }
 

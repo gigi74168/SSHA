@@ -35,6 +35,9 @@ Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou cl
   - Authentification par **mot de passe** (incluant `keyboard-interactive` / PAM) ou **clé privée SSH** (Ed25519, RSA, ECDSA + passphrase optionnelle)
   - PTY interactif complet (couleurs, `vim`, `nano`, `htop`, `tmux`, redimensionnement automatique de la fenêtre, AltGr sur claviers AZERTY Windows)
   - Vérification des empreintes serveurs (TOFU) avec alerte en cas de changement suspect
+- **Mises à jour automatiques intégrées** :
+  - Détecte automatiquement les nouvelles releases GitHub au lancement de `ssha` et propose de mettre à jour directement dans le terminal (`[O/n]`) — sans rien retaper (désactivable via `SSHA_NO_UPDATE_CHECK=1`)
+  - Commande manuelle `ssha update` disponible à tout moment
 - **Chiffrement automatique transparent** :
   - Tes connexions et mots de passe sont chiffrés dans `vault.enc` en **AES-256-GCM**
   - Clé générée et gérée automatiquement par le logiciel (**aucun mot de passe maître à gérer**) :
@@ -102,6 +105,7 @@ ssha new                                       # Assistant d'ajout en ligne de c
 ssha list                                      # Lister toutes les connexions enregistrées
 ssha test mon-pc                               # Tester la joignabilité TCP + latence
 ssha rm mon-pc                                 # Supprimer une connexion
+ssha update                                    # Vérifier et installer la dernière version
 ssha info                                      # Afficher l'emplacement du coffre-fort chiffré
 ```
 

@@ -83,6 +83,14 @@ pub enum Commands {
         name: String,
     },
 
+    /// Vérifier et installer la dernière mise à jour de ssha
+    #[command(visible_alias = "upgrade")]
+    Update {
+        /// Mettre à jour sans demander de confirmation
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
     /// Afficher l'emplacement du coffre-fort chiffré et les infos de sécurité
     Info,
 }
