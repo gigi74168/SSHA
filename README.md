@@ -27,6 +27,7 @@ Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou cl
   - Commandes slash intégrées avec autocomplétion (`Tab`) : `/new`, `/files`, `/edit`, `/del`, `/connect`, `/test`, `/refresh`, `/help`, `/quit`
   - Raccourcis clavier rapides (`↑`/`↓`, `Entrée`, `Ctrl+F`, `Ctrl+N`, `Ctrl+E`, `Ctrl+D`, `Ctrl+T`, `Ctrl+R`, `Esc`)
 - **Gestionnaire de fichiers à distance (SFTP intégré)** :
+  - **Installation automatique de SFTP** sur la machine Linux distante si le sous-système SFTP n'est pas encore installé ou activé (`apt`, `pacman`, `dnf`, `yum`, `apk`, `zypper`, `opkg` + activation `internal-sftp` & rechargement `sshd`)
   - Parcours des dossiers distants, filtrage live, fichiers cachés (`Ctrl+H`) et aperçu rapide des fichiers texte (`Entrée`)
   - **Téléchargement** de fichiers ou dossiers complets (récursif) vers ton PC (`Ctrl+D` ou `/download` ou `ssha get`)
   - **Envoi** de fichiers ou dossiers locaux vers le PC distant (`Ctrl+U` ou `/upload` ou `ssha put`)

@@ -1,5 +1,5 @@
-use crate::models::SshHost;
-use crate::ssh::{connect_and_authenticate, SshClientHandler};
+use crate::models::{AuthMethod, SshHost};
+use crate::ssh::{connect_and_authenticate, exec_remote_command, SshClientHandler};
 use crate::storage::{expand_tilde, Storage};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Local, Utc};
@@ -11,8 +11,54 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use zeroize::Zeroizing;
 
 const CHUNK_SIZE: usize = 64 * 1024;
+
+const REMOTE_SFTP_INSTALL_SCRIPT: &str = r#"set -e
+has_sftp() {
+  for p in /usr/lib/openssh/sftp-server /usr/libexec/sftp-server /usr/lib/ssh/sftp-server /usr/libexec/openssh/sftp-server; do
+    [ -x "$p" ] && return 0
+  done
+  command -v sftp-server >/dev/null 2>&1
+}
+
+if ! has_sftp; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-sftp-server
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm openssh
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y -q openssh-server
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y -q openssh-server
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache openssh-sftp-server
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install openssh
+  elif command -v opkg >/dev/null 2>&1; then
+    opkg update && opkg install openssh-sftp-server
+  fi
+fi
+
+if [ -f /etc/ssh/sshd_config ]; then
+  if ! grep -Eq '^[[:space:]]*Subsystem[[:space:]]+sftp[[:space:]]' /etc/ssh/sshd_config; then
+    printf '\nSubsystem sftp internal-sftp\n' >> /etc/ssh/sshd_config
+  fi
+  if command -v sshd >/dev/null 2>&1; then
+    sshd -t
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
+  elif command -v service >/dev/null 2>&1; then
+    service ssh reload 2>/dev/null || service sshd reload 2>/dev/null || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
+  elif [ -f /run/sshd.pid ]; then
+    kill -HUP "$(cat /run/sshd.pid)" 2>/dev/null || true
+  elif [ -f /var/run/sshd.pid ]; then
+    kill -HUP "$(cat /var/run/sshd.pid)" 2>/dev/null || true
+  fi
+fi
+"#;
 
 #[derive(Clone, Debug)]
 pub struct RemoteEntry {
@@ -44,21 +90,44 @@ pub struct SftpClient {
 
 impl SftpClient {
     /// Connects to the remote host over SSH and opens the SFTP subsystem.
+    /// If SFTP is not installed or not enabled on the remote Linux host, automatically
+    /// installs/enables it and retries once.
     pub async fn connect(host: &SshHost, storage: Arc<Storage>) -> Result<Self> {
-        let session = connect_and_authenticate(host, storage).await?;
-        let channel = session
-            .channel_open_session()
-            .await
-            .context("Impossible d'ouvrir un canal SSH pour SFTP")?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .context("Le serveur distant ne semble pas activer le sous-système SFTP")?;
-        let sftp = SftpSession::new(channel.into_stream())
-            .await
-            .context("Impossible d'initialiser la session SFTP")?;
+        let session = connect_and_authenticate(host, Arc::clone(&storage)).await?;
 
-        Ok(Self { session, sftp })
+        match try_open_sftp_subsystem(&session).await {
+            Ok(sftp) => Ok(Self { session, sftp }),
+            Err(first_err) => {
+                eprintln!(
+                    "\x1b[1;33m[ssha]\x1b[0m SFTP n'est pas actif sur \x1b[1m{}\x1b[0m ({}).",
+                    host.name, first_err
+                );
+                eprintln!(
+                    "\x1b[1;36m[ssha]\x1b[0m Vérification et installation automatique de SFTP sur la machine distante..."
+                );
+
+                ensure_remote_sftp_installed(&session, host).await?;
+                let _ = session
+                    .disconnect(Disconnect::ByApplication, "", "fr")
+                    .await;
+
+                // Reconnect so the reloaded sshd picks up the new SFTP subsystem
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let fresh_session = connect_and_authenticate(host, storage).await?;
+                let sftp = try_open_sftp_subsystem(&fresh_session).await.with_context(|| {
+                    "SFTP a été installé/configuré mais le sous-système reste indisponible sur la machine distante"
+                })?;
+
+                eprintln!(
+                    "\x1b[1;32m✓\x1b[0m SFTP installé et activé sur \x1b[1m{}\x1b[0m !",
+                    host.name
+                );
+                Ok(Self {
+                    session: fresh_session,
+                    sftp,
+                })
+            }
+        }
     }
 
     pub async fn canonicalize(&self, path: &str) -> Result<String> {
@@ -505,6 +574,80 @@ impl SftpClient {
             .disconnect(Disconnect::ByApplication, "", "fr")
             .await;
     }
+}
+
+async fn try_open_sftp_subsystem(
+    session: &client::Handle<SshClientHandler>,
+) -> Result<SftpSession> {
+    let channel = session
+        .channel_open_session()
+        .await
+        .context("Impossible d'ouvrir un canal SSH pour SFTP")?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .context("Le sous-système SFTP a été refusé par le serveur")?;
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .context("Impossible d'initialiser la session SFTP")?;
+    Ok(sftp)
+}
+
+async fn ensure_remote_sftp_installed(
+    session: &client::Handle<SshClientHandler>,
+    host: &SshHost,
+) -> Result<()> {
+    // Check that the remote host is a POSIX/Linux system
+    let (uname_code, uname_out) = exec_remote_command(session, "uname -s", None).await?;
+    if uname_code != 0 || !uname_out.to_lowercase().contains("linux") {
+        bail!(
+            "Installation automatique de SFTP uniquement supportée sur Linux (système détecté : '{}').",
+            if uname_out.is_empty() { "inconnu" } else { uname_out.as_str() }
+        );
+    }
+
+    let quoted_script = shell_single_quote(REMOTE_SFTP_INSTALL_SCRIPT);
+
+    // Determine privilege escalation method: root, passwordless sudo, or sudo -S with saved password
+    let (_, uid_out) = exec_remote_command(session, "id -u", None).await?;
+    let (exit_code, output) = if uid_out.trim() == "0" {
+        exec_remote_command(session, &format!("sh -c {quoted_script}"), None).await?
+    } else {
+        let (sudo_nopass, _) = exec_remote_command(session, "sudo -n true", None).await?;
+        if sudo_nopass == 0 {
+            exec_remote_command(session, &format!("sudo -n sh -c {quoted_script}"), None).await?
+        } else if let AuthMethod::Password { ref password } = host.auth {
+            let stdin_pw = Zeroizing::new(format!("{password}\n"));
+            exec_remote_command(
+                session,
+                &format!("sudo -S -p '' sh -c {quoted_script}"),
+                Some(stdin_pw.as_bytes()),
+            )
+            .await?
+        } else {
+            bail!(
+                "Droits root ou sudo sans mot de passe requis pour installer SFTP automatiquement sur '{}' (connexion par clé SSH).",
+                host.name
+            );
+        }
+    };
+
+    if exit_code != 0 {
+        bail!(
+            "Échec de l'installation automatique de SFTP (code {exit_code}) : {}",
+            if output.is_empty() {
+                "aucune sortie".to_string()
+            } else {
+                output
+            }
+        );
+    }
+
+    Ok(())
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 pub fn join_remote_path(base: &str, child: &str) -> String {

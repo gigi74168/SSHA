@@ -186,6 +186,46 @@ pub(crate) async fn connect_and_authenticate(
     Ok(session)
 }
 
+/// Executes a single non-interactive command over an authenticated SSH session,
+/// optionally piping `stdin_data` (e.g. for `sudo -S`) and returning `(exit_code, combined_output)`.
+pub(crate) async fn exec_remote_command(
+    session: &client::Handle<SshClientHandler>,
+    command: &str,
+    stdin_data: Option<&[u8]>,
+) -> Result<(u32, String)> {
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .context("Impossible d'ouvrir un canal SSH pour exécuter la commande distante")?;
+
+    channel
+        .exec(true, command)
+        .await
+        .context("Impossible de lancer la commande distante")?;
+
+    if let Some(data) = stdin_data {
+        if !data.is_empty() {
+            channel.data(data).await?;
+        }
+        let _ = channel.eof().await;
+    }
+
+    let mut output = Vec::new();
+    let mut exit_code: u32 = 0;
+
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { ref data } => output.extend_from_slice(data),
+            ChannelMsg::ExtendedData { ref data, .. } => output.extend_from_slice(data),
+            ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status,
+            ChannelMsg::Eof | ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+
+    Ok((exit_code, String::from_utf8_lossy(&output).trim().to_string()))
+}
+
 /// Establishes an interactive SSH terminal session with automatic authentication.
 pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Result<u32> {
     eprintln!(
