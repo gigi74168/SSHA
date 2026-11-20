@@ -494,6 +494,66 @@ impl AppState {
         self.input.starts_with('/')
     }
 
+    /// If the user typed a slash command that accepts a host name followed by a space
+    /// (e.g. `/files mo`, `/connect pc`, `/edit `, `/del `, `/test `), returns `Some((cmd, query))`.
+    fn slash_host_arg_prefix(&self) -> Option<(&str, &str)> {
+        if !self.is_slash_mode() {
+            return None;
+        }
+        let idx = self.input.find(' ')?;
+        let cmd = &self.input[..idx];
+        let query = self.input[idx + 1..].trim_start();
+        let takes_host = matches!(
+            cmd.to_lowercase().as_str(),
+            "/connect" | "/c" | "/open" | "/files" | "/sftp" | "/f" | "/edit" | "/e" | "/del"
+                | "/delete" | "/rm" | "/remove" | "/test" | "/ping"
+        );
+        if takes_host {
+            Some((cmd, query))
+        } else {
+            None
+        }
+    }
+
+    /// Returns matching hosts for the autocomplete popup above the input bar.
+    fn host_suggestions(&self) -> Vec<&SshHost> {
+        let query = if let Some((_, q)) = self.slash_host_arg_prefix() {
+            q
+        } else if !self.is_slash_mode() && !self.input.is_empty() {
+            self.input.as_str()
+        } else {
+            return Vec::new();
+        };
+
+        let q_lower = query.trim().to_lowercase();
+        let mut matches: Vec<&SshHost> = self
+            .vault
+            .hosts
+            .iter()
+            .filter(|h| h.matches_query(query))
+            .collect();
+
+        // Hide popup if user already typed the exact unique host name
+        if matches.len() == 1 && matches[0].name.to_lowercase() == q_lower {
+            return Vec::new();
+        }
+
+        // Prioritize hosts whose name starts with the typed prefix
+        if !q_lower.is_empty() {
+            matches.sort_by_key(|h| {
+                let name_l = h.name.to_lowercase();
+                if name_l.starts_with(&q_lower) {
+                    0
+                } else if name_l.contains(&q_lower) {
+                    1
+                } else {
+                    2
+                }
+            });
+        }
+        matches
+    }
+
     fn filtered_hosts(&self) -> Vec<&SshHost> {
         if self.is_slash_mode() {
             self.vault.hosts.iter().collect()
@@ -524,7 +584,11 @@ impl AppState {
     }
 
     fn clamp_selection(&mut self) {
-        let count = self.filtered_hosts().len();
+        let count = if self.slash_host_arg_prefix().is_some() {
+            self.host_suggestions().len()
+        } else {
+            self.filtered_hosts().len()
+        };
         if count == 0 {
             self.selected_row = 0;
         } else if self.selected_row >= count {
@@ -734,7 +798,11 @@ fn handle_main_key(
                     };
                 }
             } else {
-                let count = app.filtered_hosts().len();
+                let count = if app.slash_host_arg_prefix().is_some() {
+                    app.host_suggestions().len()
+                } else {
+                    app.filtered_hosts().len()
+                };
                 if count > 0 {
                     app.selected_row = if app.selected_row == 0 {
                         count - 1
@@ -751,23 +819,49 @@ fn handle_main_key(
                     app.slash_selected = (app.slash_selected + 1) % count;
                 }
             } else {
-                let count = app.filtered_hosts().len();
+                let count = if app.slash_host_arg_prefix().is_some() {
+                    app.host_suggestions().len()
+                } else {
+                    app.filtered_hosts().len()
+                };
                 if count > 0 {
                     app.selected_row = (app.selected_row + 1) % count;
                 }
             }
         }
         KeyCode::Tab => {
-            if app.is_slash_mode() {
+            if let Some((cmd_prefix, _)) = app.slash_host_arg_prefix() {
+                let cmd_owned = cmd_prefix.to_string();
+                let suggestions = app.host_suggestions();
+                if let Some(host) = suggestions.get(app.selected_row) {
+                    app.input = format!("{cmd_owned} {}", host.name);
+                }
+            } else if app.is_slash_mode() {
                 let cmds = app.filtered_slash_commands();
                 if let Some(cmd) = cmds.get(app.slash_selected) {
-                    app.input = cmd.cmd.to_string();
+                    let takes_host = matches!(
+                        cmd.cmd,
+                        "/files" | "/edit" | "/del" | "/connect" | "/test"
+                    );
+                    app.input = if takes_host {
+                        format!("{} ", cmd.cmd)
+                    } else {
+                        cmd.cmd.to_string()
+                    };
+                    app.selected_row = 0;
+                }
+            } else if !app.input.is_empty() {
+                let suggestions = app.host_suggestions();
+                if let Some(host) = suggestions.get(app.selected_row) {
+                    app.input = host.name.clone();
+                    app.selected_row = 0;
                 }
             }
         }
         KeyCode::Backspace => {
             app.input.pop();
             app.slash_selected = 0;
+            app.selected_row = 0;
         }
         KeyCode::Enter => {
             if app.is_slash_mode() {
@@ -784,7 +878,7 @@ fn handle_main_key(
         KeyCode::Char(c) => {
             app.input.push(c);
             app.slash_selected = 0;
-            if !app.is_slash_mode() {
+            if !app.is_slash_mode() || app.slash_host_arg_prefix().is_some() {
                 app.selected_row = 0;
             }
         }
@@ -1148,9 +1242,13 @@ fn draw_ui(frame: &mut Frame, app: &AppState) {
     draw_input_bar(frame, chunks[3], app);
     draw_footer(frame, chunks[4]);
 
-    // Slash command autocomplete popup right above the input bar
-    if matches!(app.modal, Modal::None) && app.is_slash_mode() && !app.input.contains(' ') {
-        draw_slash_popup(frame, chunks[3], app);
+    // Autocomplete popup right above the input bar (slash commands OR machine names)
+    if matches!(app.modal, Modal::None) {
+        if app.is_slash_mode() && !app.input.contains(' ') {
+            draw_slash_popup(frame, chunks[3], app);
+        } else if !app.host_suggestions().is_empty() {
+            draw_host_autocomplete_popup(frame, chunks[3], app);
+        }
     }
 
     match &app.modal {
@@ -1442,7 +1540,7 @@ fn draw_input_bar(frame: &mut Frame, area: Rect, app: &AppState) {
             ),
         ])
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 "> ",
                 Style::default()
@@ -1456,7 +1554,30 @@ fn draw_input_bar(frame: &mut Frame, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("▏", Style::default().fg(border_color)),
-        ])
+        ];
+
+        // Inline ghost-text suffix when the highlighted machine name starts with the typed prefix
+        let suggestions = app.host_suggestions();
+        if let Some(best) = suggestions.get(app.selected_row) {
+            let typed_part = app
+                .slash_host_arg_prefix()
+                .map(|(_, q)| q)
+                .unwrap_or(app.input.as_str());
+            let typed_chars = typed_part.chars().count();
+            if typed_chars > 0
+                && best
+                    .name
+                    .to_lowercase()
+                    .starts_with(&typed_part.to_lowercase())
+            {
+                let suffix: String = best.name.chars().skip(typed_chars).collect();
+                if !suffix.is_empty() {
+                    spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
+                }
+            }
+        }
+
+        Line::from(spans)
     };
 
     let block = Block::default()
@@ -1465,6 +1586,73 @@ fn draw_input_bar(frame: &mut Frame, area: Rect, app: &AppState) {
         .border_style(Style::default().fg(border_color));
 
     frame.render_widget(Paragraph::new(content).block(block), area);
+}
+
+fn draw_host_autocomplete_popup(frame: &mut Frame, input_area: Rect, app: &AppState) {
+    let suggestions = app.host_suggestions();
+    if suggestions.is_empty() {
+        return;
+    }
+
+    let visible_count = suggestions.len().min(6);
+    let height = (visible_count as u16 + 2).min(input_area.y);
+    if height < 3 {
+        return;
+    }
+    let width = 66u16.min(input_area.width);
+    let popup_area = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(height),
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = suggestions
+        .iter()
+        .take(visible_count)
+        .map(|h| {
+            let (dot, dot_style) = match app.ping_state_for(&h.name) {
+                PingState::Up(_) => ("● UP", Style::default().fg(Color::Green)),
+                PingState::Down => ("● DOWN", Style::default().fg(Color::Red)),
+                PingState::Checking => ("● ...", Style::default().fg(Color::Yellow)),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" {:<18}", h.name),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:<28} ", h.endpoint_display()),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(dot, dot_style),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    " Machines (Tab: compléter, ↑↓: choisir, Entrée: valider) ",
+                    Style::default().fg(Color::Cyan),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(30, 46, 64))
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = ListState::default();
+    state.select(Some(app.selected_row.min(visible_count.saturating_sub(1))));
+    frame.render_stateful_widget(list, popup_area, &mut state);
 }
 
 fn draw_slash_popup(frame: &mut Frame, input_area: Rect, app: &AppState) {
@@ -1928,5 +2116,56 @@ mod tests {
         handle_key(&mut app, press(KeyCode::Char('o')), &storage).unwrap();
         assert!(app.vault.hosts.is_empty());
         assert!(storage.load_vault().unwrap().hosts.is_empty());
+    }
+
+    #[test]
+    fn tab_autocompletes_machine_name_direct_and_after_slash_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::with_dir(dir.path().to_path_buf()).unwrap();
+        let mut vault = VaultData::default();
+        vault.hosts.push(SshHost {
+            name: "mon-ordi".into(),
+            host: "192.168.1.192".into(),
+            port: 22,
+            username: "gigi".into(),
+            auth: AuthMethod::Password {
+                password: "secret".into(),
+            },
+            group: None,
+            note: None,
+            created_at: Utc::now(),
+            last_used: None,
+        });
+        vault.hosts.push(SshHost {
+            name: "vps-prod".into(),
+            host: "51.75.42.18".into(),
+            port: 22,
+            username: "deploy".into(),
+            auth: AuthMethod::Password {
+                password: "secret".into(),
+            },
+            group: None,
+            note: None,
+            created_at: Utc::now(),
+            last_used: None,
+        });
+        let mut app = AppState::new(vault, None);
+
+        // 1. Direct typing `mon` -> suggests `mon-ordi` -> Tab completes to `mon-ordi`
+        type_str(&mut app, &storage, "mon");
+        assert_eq!(app.host_suggestions().len(), 1);
+        assert_eq!(app.host_suggestions()[0].name, "mon-ordi");
+        handle_key(&mut app, press(KeyCode::Tab), &storage).unwrap();
+        assert_eq!(app.input, "mon-ordi");
+        // Popup hides once exact unique match is completed
+        assert!(app.host_suggestions().is_empty());
+
+        // 2. Slash command `/files vp` -> suggests `vps-prod` -> Tab completes to `/files vps-prod`
+        handle_key(&mut app, press(KeyCode::Esc), &storage).unwrap();
+        type_str(&mut app, &storage, "/files vp");
+        assert_eq!(app.host_suggestions().len(), 1);
+        assert_eq!(app.host_suggestions()[0].name, "vps-prod");
+        handle_key(&mut app, press(KeyCode::Tab), &storage).unwrap();
+        assert_eq!(app.input, "/files vps-prod");
     }
 }
