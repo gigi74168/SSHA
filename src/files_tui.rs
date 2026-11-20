@@ -1,4 +1,5 @@
 use crate::models::SshHost;
+use crate::picker::{self, PickerResult};
 use crate::sftp::{
     default_download_dir, format_mtime, format_permissions, format_size, join_remote_path,
     parent_remote_path, resolve_local_path, RemoteEntry, SftpClient,
@@ -19,6 +20,7 @@ use ratatui::widgets::{
 };
 use ratatui::{Frame, Terminal};
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,7 +40,12 @@ const FILE_SLASH_COMMANDS: &[FileSlashCmd] = &[
     FileSlashCmd {
         cmd: "/upload",
         usage: "/upload",
-        desc: "Envoyer un fichier/dossier local vers le PC distant",
+        desc: "Envoyer un fichier ou dossier (fenêtre Windows/Linux)",
+    },
+    FileSlashCmd {
+        cmd: "/upload-dir",
+        usage: "/upload-dir",
+        desc: "Envoyer un dossier entier vers le PC distant",
     },
     FileSlashCmd {
         cmd: "/mkdir",
@@ -109,6 +116,7 @@ enum PromptKind {
 
 enum FileModal {
     None,
+    UploadChoice,
     Input {
         kind: PromptKind,
         title: String,
@@ -342,6 +350,10 @@ async fn handle_file_key(
 ) -> Result<bool> {
     match &mut state.modal {
         FileModal::None => handle_main_file_key(state, key, client, terminal).await,
+        FileModal::UploadChoice => {
+            handle_upload_choice_key(state, key, client, terminal).await?;
+            Ok(false)
+        }
         FileModal::Input { .. } => {
             handle_input_modal_key(state, key, client, terminal).await?;
             Ok(false)
@@ -541,6 +553,7 @@ async fn execute_file_slash_command(
     let resolved = match typed.as_str() {
         "/download" | "/get" | "/dl" => "/download",
         "/upload" | "/put" | "/up" => "/upload",
+        "/upload-dir" | "/uploaddir" | "/put-dir" => "/upload-dir",
         "/mkdir" | "/new" => "/mkdir",
         "/rename" | "/mv" => "/rename",
         "/del" | "/rm" | "/delete" => "/del",
@@ -570,6 +583,9 @@ async fn execute_file_slash_command(
     match resolved {
         "/download" => open_download_modal(state),
         "/upload" => open_upload_modal(state),
+        "/upload-dir" => {
+            pick_and_upload(state, true, client, _terminal).await;
+        }
         "/mkdir" => open_mkdir_modal(state, arg),
         "/rename" => {
             if let Some(new_name) = arg {
@@ -653,21 +669,130 @@ fn open_download_modal(state: &mut FileExplorerState) {
         },
         title: format!(" Télécharger le {kind_label} '{}' ", entry.name),
         label: "Destination locale : ".to_string(),
-        hint: "Tu peux garder le chemin par défaut (Téléchargements) ou saisir un autre chemin.".to_string(),
+        hint: "Entrée: télécharger ici  │  Ctrl+P / F3: choisir un dossier (fenêtre Windows/Linux)".to_string(),
         value: default_dest.to_string_lossy().to_string(),
         error: None,
     };
 }
 
 fn open_upload_modal(state: &mut FileExplorerState) {
+    state.modal = FileModal::UploadChoice;
+}
+
+fn open_manual_upload_modal(state: &mut FileExplorerState) {
     state.modal = FileModal::Input {
         kind: PromptKind::Upload,
         title: format!(" Envoyer vers {} ", state.cwd),
         label: "Fichier / dossier local : ".to_string(),
-        hint: "Ex: ~/Desktop/rapport.pdf ou C:\\Users\\Moi\\fichier.txt".to_string(),
+        hint: "Ex: ~/Desktop/rapport.pdf ou C:\\Users\\Moi\\Dossier".to_string(),
         value: String::new(),
         error: None,
     };
+}
+
+async fn handle_upload_choice_key(
+    state: &mut FileExplorerState,
+    key: KeyEvent,
+    client: &SftpClient,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+            state.modal = FileModal::None;
+        }
+        KeyCode::Enter | KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::Char('1') => {
+            state.modal = FileModal::None;
+            pick_and_upload(state, false, client, terminal).await;
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Char('2') => {
+            state.modal = FileModal::None;
+            pick_and_upload(state, true, client, terminal).await;
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char('3') => {
+            open_manual_upload_modal(state);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn pick_and_upload(
+    state: &mut FileExplorerState,
+    pick_dir: bool,
+    client: &SftpClient,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    let title = if pick_dir {
+        format!("Choisir un dossier à envoyer vers {}", state.cwd)
+    } else {
+        format!("Choisir un fichier à envoyer vers {}", state.cwd)
+    };
+    state.set_status(
+        StatusLevel::Info,
+        if pick_dir {
+            "Ouverture de la fenêtre de sélection de dossier..."
+        } else {
+            "Ouverture de la fenêtre de sélection de fichier..."
+        },
+    );
+    let _ = terminal.draw(|f| draw_files_ui(f, state));
+
+    let res = tokio::task::spawn_blocking(move || {
+        if pick_dir {
+            picker::pick_folder(&title)
+        } else {
+            picker::pick_file(&title, None)
+        }
+    })
+    .await
+    .unwrap_or(PickerResult::Unavailable);
+
+    match res {
+        PickerResult::Selected(path) => {
+            perform_upload(state, &path, client, terminal).await;
+        }
+        PickerResult::Cancelled => {
+            state.set_status(StatusLevel::Info, "Envoi annulé.");
+        }
+        PickerResult::Unavailable => {
+            open_manual_upload_modal(state);
+            state.set_status(
+                StatusLevel::Info,
+                "Aucune interface graphique détectée : saisis le chemin local manuellement.",
+            );
+        }
+    }
+}
+
+async fn perform_upload(
+    state: &mut FileExplorerState,
+    local_src: &Path,
+    client: &SftpClient,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) {
+    state.set_status(
+        StatusLevel::Info,
+        format!("Envoi de '{}' vers {}...", local_src.display(), state.cwd),
+    );
+    let _ = terminal.draw(|f| draw_files_ui(f, state));
+
+    match client.upload(local_src, &state.cwd, |_, _, _| {}).await {
+        Ok((remote_dest, stats)) => {
+            refresh_dir(state, client).await;
+            state.set_status(
+                StatusLevel::Success,
+                format!(
+                    "Envoyé ({} fichier(s), {}) → {}",
+                    stats.files,
+                    format_size(stats.bytes),
+                    remote_dest
+                ),
+            );
+        }
+        Err(e) => {
+            state.set_status(StatusLevel::Error, format!("Échec envoi : {e:#}"));
+        }
+    }
 }
 
 fn open_mkdir_modal(state: &mut FileExplorerState, prefill: Option<&str>) {
@@ -726,6 +851,34 @@ async fn handle_input_modal_key(
             *error = None;
         }
         return Ok(());
+    }
+
+    // Ctrl+P or F3 inside Download modal opens native OS folder picker
+    if (ctrl && !alt && key.code == KeyCode::Char('p')) || key.code == KeyCode::F(3) {
+        if let FileModal::Input {
+            kind: PromptKind::Download { remote_name, .. },
+            value,
+            error,
+            ..
+        } = &mut state.modal
+        {
+            let name = remote_name.clone();
+            let title = format!("Choisir le dossier où enregistrer '{name}'");
+            let res = tokio::task::spawn_blocking(move || picker::pick_folder(&title))
+                .await
+                .unwrap_or(PickerResult::Unavailable);
+            match res {
+                PickerResult::Selected(dir) => {
+                    *value = dir.join(&name).to_string_lossy().to_string();
+                    *error = None;
+                }
+                PickerResult::Unavailable => {
+                    *error = Some("Aucune interface graphique disponible ; saisis le chemin au clavier.".into());
+                }
+                PickerResult::Cancelled => {}
+            }
+            return Ok(());
+        }
     }
 
     match key.code {
@@ -991,6 +1144,7 @@ fn draw_files_ui(frame: &mut Frame, state: &FileExplorerState) {
 
     match &state.modal {
         FileModal::None => {}
+        FileModal::UploadChoice => draw_upload_choice_modal(frame, area, &state.cwd),
         FileModal::Input {
             title,
             label,
@@ -1559,6 +1713,53 @@ fn draw_files_help_modal(frame: &mut Frame, area: Rect) {
         Line::raw(""),
         Line::from(Span::styled(
             "  Appuie sur Esc ou Entrée pour fermer.",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+fn draw_upload_choice_modal(frame: &mut Frame, area: Rect, cwd: &str) {
+    let popup = centered_rect(72, 13, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            format!(" Envoyer vers {cwd} "),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+
+    let lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Que souhaites-tu envoyer vers la machine distante ?",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("    [F] / Entrée  ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("Choisir un "),
+            Span::styled("fichier", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" (fenêtre Windows / Linux)", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("    [D]           ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("Choisir un "),
+            Span::styled("dossier entier", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" (envoi récursif)", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled("    [S]           ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw("Saisir un chemin au clavier"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "    Esc : Annuler",
             Style::default().fg(Color::DarkGray),
         )),
     ];

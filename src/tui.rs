@@ -1,6 +1,8 @@
 use crate::models::{format_relative_time, AuthMethod, SshHost, VaultData};
+use crate::picker::{self, PickerResult};
+use crate::sftp::{default_download_dir, resolve_local_path};
 use crate::ssh::{probe_host, PingState};
-use crate::storage::Storage;
+use crate::storage::{export_vault_to_file, import_vault_from_file, Storage};
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -70,6 +72,16 @@ const SLASH_COMMANDS: &[SlashCommandDef] = &[
         cmd: "/refresh",
         usage: "/refresh",
         desc: "Actualiser le statut UP/DOWN de toutes les machines",
+    },
+    SlashCommandDef {
+        cmd: "/export",
+        usage: "/export [fichier]",
+        desc: "Exporter toutes les connexions (IP, users, mots de passe)",
+    },
+    SlashCommandDef {
+        cmd: "/import",
+        usage: "/import [fichier]",
+        desc: "Importer une configuration depuis un autre ssha",
     },
     SlashCommandDef {
         cmd: "/clear",
@@ -782,7 +794,7 @@ fn handle_main_key(
     Ok(None)
 }
 
-fn execute_slash_command(app: &mut AppState, _storage: &Storage) -> Result<Option<TuiAction>> {
+fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option<TuiAction>> {
     let raw = app.input.trim().to_string();
     let mut parts = raw.splitn(2, char::is_whitespace);
     let typed_cmd = parts.next().unwrap_or("").to_lowercase();
@@ -797,6 +809,8 @@ fn execute_slash_command(app: &mut AppState, _storage: &Storage) -> Result<Optio
         "/connect" | "/c" | "/open" => "/connect",
         "/test" | "/ping" => "/test",
         "/refresh" | "/r" => "/refresh",
+        "/export" | "/backup" => "/export",
+        "/import" | "/restore" => "/import",
         "/clear" => "/clear",
         "/help" | "/?" => "/help",
         "/quit" | "/exit" | "/q" => "/quit",
@@ -891,6 +905,72 @@ fn execute_slash_command(app: &mut AppState, _storage: &Storage) -> Result<Optio
         "/refresh" => {
             app.trigger_ping_all(true);
             app.set_status(StatusLevel::Info, "Vérification UP/DOWN de toutes les machines...");
+        }
+        "/export" => {
+            let dest = match arg {
+                Some(p) => Some(resolve_local_path(p)),
+                None => match picker::pick_save_file(
+                    "Exporter la configuration ssha",
+                    "ssha-config.json",
+                    Some(("Configuration ssha (*.json)", "*.json")),
+                ) {
+                    PickerResult::Selected(p) => Some(p),
+                    PickerResult::Cancelled => {
+                        app.set_status(StatusLevel::Info, "Export annulé.");
+                        None
+                    }
+                    PickerResult::Unavailable => Some(default_download_dir().join("ssha-config.json")),
+                },
+            };
+            if let Some(path) = dest {
+                match export_vault_to_file(&app.vault, &path) {
+                    Ok(count) => app.set_status(
+                        StatusLevel::Success,
+                        format!("{count} connexion(s) exportée(s) → {}", path.display()),
+                    ),
+                    Err(e) => app.set_status(StatusLevel::Error, format!("Échec export : {e:#}")),
+                }
+            }
+        }
+        "/import" => {
+            let src = match arg {
+                Some(p) => Some(resolve_local_path(p)),
+                None => match picker::pick_file(
+                    "Importer une configuration ssha",
+                    Some(("Configuration ssha (*.json)", "*.json")),
+                ) {
+                    PickerResult::Selected(p) => Some(p),
+                    PickerResult::Cancelled => {
+                        app.set_status(StatusLevel::Info, "Import annulé.");
+                        None
+                    }
+                    PickerResult::Unavailable => {
+                        app.set_status(
+                            StatusLevel::Info,
+                            "Tape `/import <chemin_du_fichier.json>` pour importer sans interface graphique.",
+                        );
+                        None
+                    }
+                },
+            };
+            if let Some(path) = src {
+                match import_vault_from_file(storage, &path, true) {
+                    Ok(report) => {
+                        if let Ok(reloaded) = storage.load_vault() {
+                            app.vault = reloaded;
+                            app.trigger_ping_all(true);
+                        }
+                        app.set_status(
+                            StatusLevel::Success,
+                            format!(
+                                "Import terminé : {} ajoutée(s), {} mise(s) à jour.",
+                                report.added, report.updated
+                            ),
+                        );
+                    }
+                    Err(e) => app.set_status(StatusLevel::Error, format!("Échec import : {e:#}")),
+                }
+            }
         }
         "/clear" => {
             app.status = None;

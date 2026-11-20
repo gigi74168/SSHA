@@ -2,6 +2,7 @@ mod cli;
 mod crypto;
 mod files_tui;
 mod models;
+mod picker;
 mod sftp;
 mod ssh;
 mod storage;
@@ -56,7 +57,13 @@ async fn run() -> Result<i32> {
                 name,
                 local,
                 remote,
-            } => cli::cmd_put(storage, &name, &local, remote.as_deref()).await?,
+                dir,
+            } => cli::cmd_put(storage, &name, local.as_deref(), remote.as_deref(), dir).await?,
+            Commands::Export { output } => cli::cmd_export(&storage, output.as_deref())?,
+            Commands::Import {
+                input,
+                keep_existing,
+            } => cli::cmd_import(&storage, input.as_deref(), keep_existing)?,
             Commands::Rm { name, yes } => cli::cmd_rm(&storage, &name, yes)?,
             Commands::Test { name } => cli::cmd_test(&storage, &name).await?,
             Commands::Update { .. } => unreachable!(),

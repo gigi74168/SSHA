@@ -1,9 +1,10 @@
 use crate::crypto::protection_summary;
 use crate::files_tui;
 use crate::models::{format_relative_time, AuthMethod, SshHost};
+use crate::picker::{self, PickerResult};
 use crate::sftp::{self, SftpClient};
 use crate::ssh;
-use crate::storage::Storage;
+use crate::storage::{export_vault_to_file, import_vault_from_file, Storage};
 use anyhow::{bail, Result};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
@@ -15,7 +16,7 @@ use std::sync::Arc;
     name = "ssha",
     version,
     about = "Gestionnaire de connexions SSH 100% CLI avec coffre-fort chiffré automatique",
-    long_about = "Lance `ssha` sans argument pour ouvrir l'interface interactive (avec /new, /files, /edit, /del, recherche live),\nou passe directement le nom d'une machine (`ssha mon-pc`) pour t'y connecter instantanément."
+    long_about = "Lance `ssha` sans argument pour ouvrir l'interface interactive (avec /new, /files, /export, /import, /edit, /del),\nou passe directement le nom d'une machine (`ssha mon-pc`) pour t'y connecter instantanément."
 )]
 pub struct Cli {
     /// Nom d'une connexion enregistrée pour s'y connecter directement
@@ -61,10 +62,30 @@ pub enum Commands {
     Put {
         /// Nom / alias de la connexion
         name: String,
-        /// Chemin du fichier ou dossier local à envoyer
-        local: String,
+        /// Chemin du fichier ou dossier local (si omis, ouvre la fenêtre Windows/Linux)
+        local: Option<String>,
         /// Dossier ou chemin de destination sur la machine distante (défaut: dossier home distant)
         remote: Option<String>,
+        /// Ouvrir la fenêtre de sélection de dossier (si aucun chemin local n'est fourni)
+        #[arg(short = 'd', long)]
+        dir: bool,
+    },
+
+    /// Exporter toutes les connexions (IP, utilisateurs, mots de passe) dans un fichier JSON portable
+    #[command(visible_alias = "backup")]
+    Export {
+        /// Fichier de sortie (si omis, ouvre la fenêtre Enregistrer sous ou crée ssha-config.json)
+        output: Option<String>,
+    },
+
+    /// Importer des connexions depuis un fichier exporté par un autre ssha
+    #[command(visible_alias = "restore")]
+    Import {
+        /// Fichier JSON à importer (si omis, ouvre la fenêtre Ouvrir)
+        input: Option<String>,
+        /// Ne pas écraser les connexions existantes ayant le même nom
+        #[arg(long)]
+        keep_existing: bool,
     },
 
     /// Supprimer une connexion enregistrée
@@ -459,8 +480,9 @@ pub async fn cmd_get(
 pub async fn cmd_put(
     storage: Arc<Storage>,
     name: &str,
-    local: &str,
+    local: Option<&str>,
     remote: Option<&str>,
+    pick_dir: bool,
 ) -> Result<()> {
     let mut vault = storage.load_vault()?;
     let Some(host) = vault.find_by_name(name).cloned() else {
@@ -470,13 +492,43 @@ pub async fn cmd_put(
         );
     };
 
-    vault.mark_used(&host.name);
-    let _ = storage.save_vault(&vault);
+    let local_src = match local {
+        Some(p) => sftp::resolve_local_path(p),
+        None => {
+            let title = if pick_dir {
+                format!("Choisir un dossier à envoyer vers {}", host.name)
+            } else {
+                format!("Choisir un fichier à envoyer vers {}", host.name)
+            };
+            let res = tokio::task::spawn_blocking(move || {
+                if pick_dir {
+                    picker::pick_folder(&title)
+                } else {
+                    picker::pick_file(&title, None)
+                }
+            })
+            .await
+            .unwrap_or(PickerResult::Unavailable);
+            match res {
+                PickerResult::Selected(p) => p,
+                PickerResult::Cancelled => {
+                    println!("Envoi annulé.");
+                    return Ok(());
+                }
+                PickerResult::Unavailable => {
+                    let entered = prompt_required("Chemin du fichier ou dossier local à envoyer")?;
+                    sftp::resolve_local_path(&entered)
+                }
+            }
+        }
+    };
 
-    let local_src = sftp::resolve_local_path(local);
     if !local_src.exists() {
         bail!("Fichier ou dossier local introuvable : '{}'", local_src.display());
     }
+
+    vault.mark_used(&host.name);
+    let _ = storage.save_vault(&vault);
 
     println!(
         "\x1b[1;36m[ssha]\x1b[0m Connexion SFTP à \x1b[1m{}\x1b[0m ({})...",
@@ -517,6 +569,70 @@ pub async fn cmd_put(
         stats.files,
         sftp::format_size(stats.bytes),
         saved_remote
+    );
+    Ok(())
+}
+
+pub fn cmd_export(storage: &Storage, output: Option<&str>) -> Result<()> {
+    let vault = storage.load_vault()?;
+    if vault.hosts.is_empty() {
+        println!("Aucune connexion SSH enregistrée à exporter.");
+        return Ok(());
+    }
+
+    let dest = match output {
+        Some(p) => sftp::resolve_local_path(p),
+        None => match picker::pick_save_file(
+            "Exporter la configuration ssha",
+            "ssha-config.json",
+            Some(("Configuration ssha (*.json)", "*.json")),
+        ) {
+            PickerResult::Selected(p) => p,
+            PickerResult::Cancelled => {
+                println!("Export annulé.");
+                return Ok(());
+            }
+            PickerResult::Unavailable => sftp::default_download_dir().join("ssha-config.json"),
+        },
+    };
+
+    let count = export_vault_to_file(&vault, &dest)?;
+    println!(
+        "\x1b[1;32m✓\x1b[0m {} connexion(s) exportée(s) → \x1b[1m{}\x1b[0m",
+        count,
+        dest.display()
+    );
+    println!("\x1b[33m[!]\x1b[0m Ce fichier contient tes mots de passe SSH : garde-le en lieu sûr et supprime-le après transfert.");
+    Ok(())
+}
+
+pub fn cmd_import(storage: &Storage, input: Option<&str>, keep_existing: bool) -> Result<()> {
+    let src = match input {
+        Some(p) => sftp::resolve_local_path(p),
+        None => match picker::pick_file(
+            "Importer une configuration ssha",
+            Some(("Configuration ssha (*.json)", "*.json")),
+        ) {
+            PickerResult::Selected(p) => p,
+            PickerResult::Cancelled => {
+                println!("Import annulé.");
+                return Ok(());
+            }
+            PickerResult::Unavailable => {
+                let entered = prompt_required("Chemin du fichier ssha-config.json à importer")?;
+                sftp::resolve_local_path(&entered)
+            }
+        },
+    };
+
+    let report = import_vault_from_file(storage, &src, !keep_existing)?;
+    println!(
+        "\x1b[1;32m✓\x1b[0m Import terminé depuis \x1b[1m{}\x1b[0m :",
+        src.display()
+    );
+    println!(
+        "  {} ajoutée(s), {} mise(s) à jour, {} ignorée(s) — chiffrées automatiquement dans vault.enc.",
+        report.added, report.updated, report.skipped
     );
     Ok(())
 }

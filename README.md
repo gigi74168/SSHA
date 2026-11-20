@@ -29,9 +29,11 @@ Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou cl
 - **Gestionnaire de fichiers à distance (SFTP intégré)** :
   - **Installation automatique de SFTP** sur la machine Linux distante si le sous-système SFTP n'est pas encore installé ou activé (`apt`, `pacman`, `dnf`, `yum`, `apk`, `zypper`, `opkg` + activation `internal-sftp` & rechargement `sshd`)
   - Parcours des dossiers distants, filtrage live, fichiers cachés (`Ctrl+H`) et aperçu rapide des fichiers texte (`Entrée`)
-  - **Téléchargement** de fichiers ou dossiers complets (récursif) vers ton PC (`Ctrl+D` ou `/download` ou `ssha get`)
-  - **Envoi** de fichiers ou dossiers locaux vers le PC distant (`Ctrl+U` ou `/upload` ou `ssha put`)
+  - **Téléchargement** de fichiers ou dossiers complets (récursif) vers n'importe où sur ton PC (`Ctrl+D` / `/download` avec bouton `Ctrl+P` / `F3` ouvrant la fenêtre de choix de dossier Windows/Linux, ou `ssha get`)
+  - **Envoi** de fichiers ou dossiers complets (récursif) vers la machine distante avec **fenêtre native Windows / Linux de sélection de fichier ou dossier** (`Ctrl+U` / `/upload` / `/upload-dir` ou `ssha put`)
   - **Création de dossier** (`Ctrl+N` / `/mkdir`), **renommage** (`Ctrl+E` / `/rename`), **suppression** récursive sécurisée (`Ctrl+X` / `/del`)
+- **Import / Export complet de la configuration** :
+  - Exporte toutes tes connexions (IP, ports, utilisateurs, mots de passe, clés, groupes, notes) dans un fichier portable (`ssha export` ou `/export`) et réimporte-les sur un autre PC (`ssha import` ou `/import`) avec sélecteur de fichier natif Windows/Linux
 - **Connexion directe** : `ssha mon-pc` te connecte sans même ouvrir le menu
 - **Client SSH & SFTP natif multiplateforme** (`russh` + `russh-sftp`) :
   - Authentification par **mot de passe** (incluant `keyboard-interactive` / PAM) ou **clé privée SSH** (Ed25519, RSA, ECDSA + passphrase optionnelle)
@@ -94,17 +96,25 @@ ssha
 Dans l'interface :
 - Tape **`/new`** (ou appuie sur `Ctrl+N`) pour ajouter une nouvelle machine (ex: nom `mon-pc`, IP `192.168.1.192`, utilisateur, mot de passe SSH).
 - Utilise **`↑` / `↓`** (ou tape quelques lettres pour filtrer) puis appuie sur **`Entrée`** pour ouvrir le terminal SSH, ou **`Ctrl+F`** (ou `/files`) pour ouvrir le **gestionnaire de fichiers distant**.
-- Dans le gestionnaire de fichiers : `Entrée` ouvre un dossier ou affiche un aperçu texte, `Ctrl+D` (`/download`) télécharge sur ton PC, `Ctrl+U` (`/upload`) envoie un fichier local, `Ctrl+N` (`/mkdir`) crée un dossier, `Ctrl+E` (`/rename`) renomme, `Ctrl+X` (`/del`) supprime.
+- Dans le gestionnaire de fichiers :
+  - `Ctrl+U` (`/upload`) ouvre le choix **Fichier (`F`) / Dossier (`D`)** avec la fenêtre native Windows/Linux et envoie directement
+  - `Ctrl+D` (`/download`) télécharge le fichier ou dossier sélectionné (`Ctrl+P` / `F3` pour choisir le dossier de destination dans la fenêtre Windows/Linux)
+  - `Entrée` ouvre un dossier ou affiche un aperçu texte, `Ctrl+N` (`/mkdir`) crée un dossier, `Ctrl+E` (`/rename`) renomme, `Ctrl+X` (`/del`) supprime.
+- Tape **`/export`** ou **`/import`** pour sauvegarder ou transférer toutes tes connexions vers un autre PC.
 
 ### 2. Commandes directes depuis le terminal
 ```bash
 ssha mon-pc                                    # Connexion SSH directe à "mon-pc"
 ssha files mon-pc                              # Ouvrir l'explorateur de fichiers distant (SFTP)
 ssha get mon-pc /home/gigi/rapport.pdf         # Télécharger un fichier/dossier dans Téléchargements
-ssha get mon-pc /var/log/app.log ./app.log     # Télécharger vers un chemin local précis
-ssha put mon-pc ./mon-fichier.txt /tmp/        # Envoyer un fichier/dossier local vers le PC distant
+ssha get mon-pc /home/gigi/mon-dossier ./dest  # Télécharger un dossier récursivement où tu veux
+ssha put mon-pc                                # Ouvrir la fenêtre Windows/Linux pour choisir un fichier à envoyer
+ssha put mon-pc --dir                          # Ouvrir la fenêtre Windows/Linux pour choisir un dossier à envoyer
+ssha put mon-pc ./mon-dossier /home/gigi/      # Envoyer un fichier/dossier local directement
+ssha export                                    # Exporter toutes les connexions (IP, users, mdp) en JSON
+ssha import                                    # Importer une config exportée depuis un autre ssha
 ssha new                                       # Assistant d'ajout en ligne de commande
-ssha list                                      # Lister toutes les connexions enregistrées
+ssha list                                      # Lister les connexions avec statut UP/DOWN
 ssha test mon-pc                               # Tester la joignabilité TCP + latence
 ssha rm mon-pc                                 # Supprimer une connexion
 ssha update                                    # Vérifier et installer la dernière version

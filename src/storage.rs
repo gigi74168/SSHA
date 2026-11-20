@@ -135,6 +135,98 @@ fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf())
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ExportBundle {
+    #[serde(default = "default_export_format")]
+    format: String,
+    #[serde(default = "chrono::Utc::now")]
+    exported_at: chrono::DateTime<chrono::Utc>,
+    hosts: Vec<crate::models::SshHost>,
+}
+
+fn default_export_format() -> String {
+    "ssha-export-v1".to_string()
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImportReport {
+    pub added: usize,
+    pub updated: usize,
+    pub skipped: usize,
+}
+
+/// Exports all saved SSH hosts (IPs, users, passwords, keys, groups, notes) to a portable JSON file.
+pub fn export_vault_to_file(vault: &VaultData, path: &Path) -> Result<usize> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Impossible de créer le dossier {}", parent.display())
+            })?;
+        }
+    }
+
+    let bundle = ExportBundle {
+        format: default_export_format(),
+        exported_at: chrono::Utc::now(),
+        hosts: vault.hosts.clone(),
+    };
+    let json = Zeroizing::new(
+        serde_json::to_vec_pretty(&bundle)
+            .context("Impossible de sérialiser la configuration pour l'export.")?,
+    );
+    write_secret_file(path, &json)?;
+    Ok(bundle.hosts.len())
+}
+
+/// Imports SSH hosts from an exported JSON file into the local encrypted vault.
+/// When `overwrite_existing` is true, existing entries with the same name are updated;
+/// otherwise they are kept untouched and counted as skipped.
+pub fn import_vault_from_file(
+    storage: &Storage,
+    path: &Path,
+    overwrite_existing: bool,
+) -> Result<ImportReport> {
+    if !path.exists() {
+        anyhow::bail!("Fichier d'import introuvable : {}", path.display());
+    }
+    let raw = Zeroizing::new(
+        fs::read(path)
+            .with_context(|| format!("Impossible de lire le fichier {}", path.display()))?,
+    );
+
+    let imported_hosts: Vec<crate::models::SshHost> =
+        if let Ok(bundle) = serde_json::from_slice::<ExportBundle>(&raw) {
+            bundle.hosts
+        } else if let Ok(v) = serde_json::from_slice::<VaultData>(&raw) {
+            v.hosts
+        } else {
+            anyhow::bail!(
+                "Format de fichier d'import invalide : '{}'. Attendu un export JSON généré par ssha.",
+                path.display()
+            );
+        };
+
+    let mut vault = storage.load_vault()?;
+    let mut report = ImportReport::default();
+
+    for host in imported_hosts {
+        if let Some(idx) = vault.find_index_by_name(&host.name) {
+            if overwrite_existing {
+                vault.hosts[idx] = host;
+                report.updated += 1;
+            } else {
+                report.skipped += 1;
+            }
+        } else {
+            vault.hosts.push(host);
+            report.added += 1;
+        }
+    }
+
+    storage.save_vault(&vault)?;
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +268,54 @@ mod tests {
         assert_eq!(reloaded.hosts.len(), 1);
         assert_eq!(reloaded.hosts[0].name, "mon-pc");
         assert_eq!(reloaded.hosts[0].host, "192.168.1.192");
+    }
+
+    #[test]
+    fn export_and_import_between_two_vaults() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let storage_a = Storage::with_dir(dir_a.path().to_path_buf()).unwrap();
+        let storage_b = Storage::with_dir(dir_b.path().to_path_buf()).unwrap();
+
+        let mut vault_a = VaultData::default();
+        vault_a.hosts.push(SshHost {
+            name: "serveur-linux".into(),
+            host: "192.168.1.192".into(),
+            port: 2222,
+            username: "gigi".into(),
+            auth: AuthMethod::Password {
+                password: "mdp-export-test".into(),
+            },
+            group: Some("Maison".into()),
+            note: Some("PC principal".into()),
+            created_at: Utc::now(),
+            last_used: None,
+        });
+        storage_a.save_vault(&vault_a).unwrap();
+
+        let export_file = dir_a.path().join("ssha-backup.json");
+        let count = export_vault_to_file(&vault_a, &export_file).unwrap();
+        assert_eq!(count, 1);
+
+        let report = import_vault_from_file(&storage_b, &export_file, true).unwrap();
+        assert_eq!(report.added, 1);
+        assert_eq!(report.updated, 0);
+
+        let vault_b = storage_b.load_vault().unwrap();
+        assert_eq!(vault_b.hosts.len(), 1);
+        assert_eq!(vault_b.hosts[0].host, "192.168.1.192");
+        assert_eq!(vault_b.hosts[0].port, 2222);
+        assert_eq!(vault_b.hosts[0].username, "gigi");
+        assert_eq!(
+            vault_b.hosts[0].auth,
+            AuthMethod::Password {
+                password: "mdp-export-test".into()
+            }
+        );
+
+        // Re-importing with overwrite=false skips duplicate
+        let report2 = import_vault_from_file(&storage_b, &export_file, false).unwrap();
+        assert_eq!(report2.added, 0);
+        assert_eq!(report2.skipped, 1);
     }
 }
