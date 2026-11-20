@@ -2,6 +2,7 @@ use crate::models::{format_relative_time, AuthMethod, SshHost, VaultData};
 use crate::picker::{self, PickerResult};
 use crate::sftp::{default_download_dir, resolve_local_path};
 use crate::ssh::{probe_host, PingState};
+use crate::ssh_config;
 use crate::storage::{export_vault_to_file, import_vault_from_file, Storage};
 use anyhow::Result;
 use chrono::Utc;
@@ -82,6 +83,11 @@ const SLASH_COMMANDS: &[SlashCommandDef] = &[
         cmd: "/import",
         usage: "/import [fichier]",
         desc: "Importer une configuration depuis un autre ssha",
+    },
+    SlashCommandDef {
+        cmd: "/import-ssh",
+        usage: "/import-ssh [chemin]",
+        desc: "Importer les machines depuis ~/.ssh/config (OpenSSH)",
     },
     SlashCommandDef {
         cmd: "/clear",
@@ -359,6 +365,14 @@ impl HostForm {
             auth,
             group,
             note,
+            proxy_jump: existing_meta.and_then(|e| e.proxy_jump.clone()),
+            local_forwards: existing_meta
+                .map(|e| e.local_forwards.clone())
+                .unwrap_or_default(),
+            extra_keys: existing_meta
+                .map(|e| e.extra_keys.clone())
+                .unwrap_or_default(),
+            forward_agent: existing_meta.map(|e| e.forward_agent).unwrap_or(false),
             created_at: existing_meta.map(|e| e.created_at).unwrap_or_else(Utc::now),
             last_used: existing_meta.and_then(|e| e.last_used),
         })
@@ -905,6 +919,7 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
         "/refresh" | "/r" => "/refresh",
         "/export" | "/backup" => "/export",
         "/import" | "/restore" => "/import",
+        "/import-ssh" | "/ssh-config" => "/import-ssh",
         "/clear" => "/clear",
         "/help" | "/?" => "/help",
         "/quit" | "/exit" | "/q" => "/quit",
@@ -1064,6 +1079,32 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
                     }
                     Err(e) => app.set_status(StatusLevel::Error, format!("Échec import : {e:#}")),
                 }
+            }
+        }
+        "/import-ssh" => {
+            let target = match arg {
+                Some(p) => Some(resolve_local_path(p)),
+                None => ssh_config::default_ssh_config_path(),
+            };
+            if let Some(path) = target {
+                match ssh_config::import_from_ssh_config(storage, &path, false) {
+                    Ok(report) => {
+                        if let Ok(reloaded) = storage.load_vault() {
+                            app.vault = reloaded;
+                            app.trigger_ping_all(true);
+                        }
+                        app.set_status(
+                            StatusLevel::Success,
+                            format!(
+                                "Import ~/.ssh/config : {} ajoutée(s), {} ignorée(s).",
+                                report.added, report.skipped
+                            ),
+                        );
+                    }
+                    Err(e) => app.set_status(StatusLevel::Error, format!("{e:#}")),
+                }
+            } else {
+                app.set_status(StatusLevel::Error, "Impossible de localiser ~/.ssh/config.");
             }
         }
         "/clear" => {
@@ -2133,6 +2174,10 @@ mod tests {
             },
             group: None,
             note: None,
+            proxy_jump: None,
+            local_forwards: Vec::new(),
+            extra_keys: Vec::new(),
+            forward_agent: false,
             created_at: Utc::now(),
             last_used: None,
         });
@@ -2146,6 +2191,10 @@ mod tests {
             },
             group: None,
             note: None,
+            proxy_jump: None,
+            local_forwards: Vec::new(),
+            extra_keys: Vec::new(),
+            forward_agent: false,
             created_at: Utc::now(),
             last_used: None,
         });

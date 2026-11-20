@@ -16,7 +16,11 @@ pub fn pick_file(title: &str, filter: Option<(&str, &str)>) -> PickerResult {
     {
         windows_pick_file(title, filter)
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        macos_pick_file(title, filter)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         unix_pick_file(title, filter)
     }
@@ -33,7 +37,11 @@ pub fn pick_folder(title: &str) -> PickerResult {
     {
         windows_pick_folder(title)
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        macos_pick_folder(title)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         unix_pick_folder(title)
     }
@@ -50,7 +58,11 @@ pub fn pick_save_file(title: &str, default_name: &str, filter: Option<(&str, &st
     {
         windows_pick_save_file(title, default_name, filter)
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        macos_pick_save_file(title, default_name, filter)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         unix_pick_save_file(title, default_name, filter)
     }
@@ -174,12 +186,74 @@ $owner.Dispose()"#,
     run_powershell_dialog(&script)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(target_os = "macos")]
+fn run_osascript(script: &str) -> PickerResult {
+    use std::process::Command;
+
+    let out = match Command::new("osascript").args(["-e", script]).output() {
+        Ok(o) => o,
+        Err(_) => return PickerResult::Unavailable,
+    };
+    if out.status.success() {
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if path.is_empty() {
+            PickerResult::Cancelled
+        } else {
+            PickerResult::Selected(PathBuf::from(path))
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("-128") || stderr.to_lowercase().contains("cancel") {
+            PickerResult::Cancelled
+        } else {
+            PickerResult::Unavailable
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pick_file(title: &str, _filter: Option<(&str, &str)>) -> PickerResult {
+    let script = format!(
+        r#"POSIX path of (choose file with prompt "{}")"#,
+        applescript_escape(title)
+    );
+    run_osascript(&script)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pick_folder(title: &str) -> PickerResult {
+    let script = format!(
+        r#"POSIX path of (choose folder with prompt "{}")"#,
+        applescript_escape(title)
+    );
+    run_osascript(&script)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pick_save_file(
+    title: &str,
+    default_name: &str,
+    _filter: Option<(&str, &str)>,
+) -> PickerResult {
+    let script = format!(
+        r#"POSIX path of (choose file name with prompt "{}" default name "{}")"#,
+        applescript_escape(title),
+        applescript_escape(default_name)
+    );
+    run_osascript(&script)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn has_graphical_session() -> bool {
     std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn run_unix_cmd(bin: &str, args: &[String]) -> Option<PickerResult> {
     use std::process::Command;
 
@@ -198,7 +272,7 @@ fn run_unix_cmd(bin: &str, args: &[String]) -> Option<PickerResult> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn unix_pick_file(title: &str, filter: Option<(&str, &str)>) -> PickerResult {
     if !has_graphical_session() {
         return PickerResult::Unavailable;
@@ -233,7 +307,7 @@ fn unix_pick_file(title: &str, filter: Option<(&str, &str)>) -> PickerResult {
     PickerResult::Unavailable
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn unix_pick_folder(title: &str) -> PickerResult {
     if !has_graphical_session() {
         return PickerResult::Unavailable;
@@ -261,7 +335,7 @@ fn unix_pick_folder(title: &str) -> PickerResult {
     PickerResult::Unavailable
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn unix_pick_save_file(
     title: &str,
     default_name: &str,

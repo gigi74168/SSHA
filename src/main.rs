@@ -5,6 +5,7 @@ mod models;
 mod picker;
 mod sftp;
 mod ssh;
+mod ssh_config;
 mod storage;
 mod tui;
 mod updater;
@@ -64,6 +65,10 @@ async fn run() -> Result<i32> {
                 input,
                 keep_existing,
             } => cli::cmd_import(&storage, input.as_deref(), keep_existing)?,
+            Commands::ImportSsh { path, overwrite } => {
+                cli::cmd_import_ssh(&storage, path.as_deref(), overwrite)?
+            }
+            Commands::Security { action } => cli::cmd_security(&storage, action)?,
             Commands::Rm { name, yes } => cli::cmd_rm(&storage, &name, yes)?,
             Commands::Test { name } => cli::cmd_test(&storage, &name).await?,
             Commands::Update { .. } => unreachable!(),
@@ -76,6 +81,9 @@ async fn run() -> Result<i32> {
     if updater::check_and_prompt_startup().await {
         return Ok(0);
     }
+
+    // Unlock vault once before entering TUI if optional Master Password mode is enabled
+    storage.ensure_unlocked()?;
 
     if let Some(target) = cli.target {
         return cli::cmd_direct_connect(storage, &target).await;

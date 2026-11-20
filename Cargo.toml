@@ -1,11 +1,11 @@
 [package]
 name = "ssha"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
-description = "Gestionnaire de connexions SSH 100% CLI avec coffre-fort chiffré automatique (Windows & Linux)"
+description = "Gestionnaire de connexions SSH & SFTP 100% CLI avec coffre-fort chiffré (Windows, Linux, macOS)"
 license = "MIT"
 repository = "https://github.com/gigi74168/SSHA"
-keywords = ["ssh", "cli", "tui", "manager", "terminal"]
+keywords = ["ssh", "sftp", "cli", "tui", "terminal"]
 categories = ["command-line-utilities"]
 
 [[bin]]
@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 aes-gcm = "0.11"
 anyhow = "1.0"
+argon2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"

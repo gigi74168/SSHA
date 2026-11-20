@@ -1,4 +1,7 @@
-use crate::crypto::{decrypt_vault, encrypt_vault, load_or_create_key, write_secret_file};
+use crate::crypto::{
+    decrypt_vault, decrypt_vault_with_password, encrypt_vault, encrypt_vault_with_password,
+    is_master_password_vault, load_or_create_key, write_secret_file,
+};
 use crate::models::{KnownHostEntry, VaultData};
 use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
@@ -6,10 +9,12 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 pub struct Storage {
     config_dir: PathBuf,
+    master_password: Mutex<Option<Zeroizing<String>>>,
 }
 
 impl Storage {
@@ -24,13 +29,19 @@ impl Storage {
         };
 
         ensure_private_dir(&config_dir)?;
-        Ok(Self { config_dir })
+        Ok(Self {
+            config_dir,
+            master_password: Mutex::new(None),
+        })
     }
 
     #[cfg(test)]
     pub fn with_dir(dir: PathBuf) -> Result<Self> {
         ensure_private_dir(&dir)?;
-        Ok(Self { config_dir: dir })
+        Ok(Self {
+            config_dir: dir,
+            master_password: Mutex::new(None),
+        })
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -49,33 +60,121 @@ impl Storage {
         self.config_dir.join("known_hosts.json")
     }
 
+    pub fn is_master_password_enabled(&self) -> bool {
+        let path = self.vault_path();
+        if !path.exists() {
+            return self
+                .master_password
+                .lock()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+        }
+        fs::read(&path)
+            .map(|b| is_master_password_vault(&b))
+            .unwrap_or(false)
+    }
+
+    fn cached_master_password(&self) -> Option<Zeroizing<String>> {
+        self.master_password.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn set_cached_master_password(&self, pw: Option<String>) {
+        if let Ok(mut guard) = self.master_password.lock() {
+            *guard = pw.map(Zeroizing::new);
+        }
+    }
+
+    /// Prompts once for the master password if the vault uses optional Master Password mode (v2).
+    pub fn ensure_unlocked(&self) -> Result<()> {
+        if !self.is_master_password_enabled() || self.cached_master_password().is_some() {
+            return Ok(());
+        }
+        let encrypted = fs::read(self.vault_path())?;
+        for attempt in 1..=3 {
+            let pw = rpassword::prompt_password("Mot de passe maître ssha : ")?;
+            match decrypt_vault_with_password(&encrypted, &pw) {
+                Ok(_) => {
+                    self.set_cached_master_password(Some(pw));
+                    return Ok(());
+                }
+                Err(_) if attempt < 3 => {
+                    eprintln!("\x1b[1;31m✗\x1b[0m Mot de passe maître incorrect ({attempt}/3).");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        anyhow::bail!("Trop de tentatives de mot de passe maître.")
+    }
+
+    /// Migrates the vault to optional Master Password mode (Argon2id + AES-256-GCM) and removes `.vault.key`.
+    pub fn enable_master_password(&self, new_password: &str) -> Result<()> {
+        if new_password.is_empty() {
+            anyhow::bail!("Le mot de passe maître ne peut pas être vide.");
+        }
+        let vault = self.load_vault()?;
+        self.set_cached_master_password(Some(new_password.to_string()));
+        self.save_vault(&vault)?;
+        let _ = fs::remove_file(self.key_path());
+        Ok(())
+    }
+
+    /// Migrates the vault back to automatic key mode (no master password prompt).
+    pub fn disable_master_password(&self) -> Result<()> {
+        let vault = self.load_vault()?;
+        self.set_cached_master_password(None);
+        // Force v1 save by writing with automatic key
+        let key = load_or_create_key(&self.key_path())?;
+        let json = Zeroizing::new(serde_json::to_vec_pretty(&vault)?);
+        let encrypted = encrypt_vault(&json, &key)?;
+        self.atomic_write_vault(&encrypted)
+    }
+
     pub fn load_vault(&self) -> Result<VaultData> {
         let path = self.vault_path();
         if !path.exists() {
-            // Ensure key is initialized lazily when saving, or return empty vault cleanly.
             return Ok(VaultData::default());
         }
 
-        let key = load_or_create_key(&self.key_path())?;
         let encrypted = fs::read(&path)
             .with_context(|| format!("Impossible de lire le coffre-fort: {}", path.display()))?;
-        let plaintext = decrypt_vault(&encrypted, &key)?;
+
+        let plaintext = if is_master_password_vault(&encrypted) {
+            if self.cached_master_password().is_none() {
+                self.ensure_unlocked()?;
+            }
+            let pw = self
+                .cached_master_password()
+                .ok_or_else(|| anyhow!("Coffre-fort verrouillé par mot de passe maître."))?;
+            decrypt_vault_with_password(&encrypted, &pw)?
+        } else {
+            let key = load_or_create_key(&self.key_path())?;
+            decrypt_vault(&encrypted, &key)?
+        };
+
         let vault: VaultData = serde_json::from_slice(&plaintext)
             .context("Impossible de désérialiser les données du coffre-fort.")?;
         Ok(vault)
     }
 
     pub fn save_vault(&self, vault: &VaultData) -> Result<()> {
-        let key = load_or_create_key(&self.key_path())?;
         let json = Zeroizing::new(
             serde_json::to_vec_pretty(vault)
                 .context("Impossible de sérialiser le coffre-fort.")?,
         );
-        let encrypted = encrypt_vault(&json, &key)?;
 
-        // Atomic write via temporary file in the same directory.
+        let encrypted = if let Some(pw) = self.cached_master_password() {
+            encrypt_vault_with_password(&json, &pw)?
+        } else {
+            let key = load_or_create_key(&self.key_path())?;
+            encrypt_vault(&json, &key)?
+        };
+
+        self.atomic_write_vault(&encrypted)
+    }
+
+    fn atomic_write_vault(&self, encrypted: &[u8]) -> Result<()> {
         let tmp_path = self.config_dir.join("vault.enc.tmp");
-        write_secret_file(&tmp_path, &encrypted)?;
+        write_secret_file(&tmp_path, encrypted)?;
         fs::rename(&tmp_path, self.vault_path()).with_context(|| {
             format!(
                 "Impossible de remplacer le coffre-fort {}",
@@ -251,6 +350,10 @@ mod tests {
             },
             group: Some("Maison".into()),
             note: None,
+            proxy_jump: None,
+            local_forwards: Vec::new(),
+            extra_keys: Vec::new(),
+            forward_agent: false,
             created_at: Utc::now(),
             last_used: None,
         });
@@ -288,6 +391,10 @@ mod tests {
             },
             group: Some("Maison".into()),
             note: Some("PC principal".into()),
+            proxy_jump: None,
+            local_forwards: Vec::new(),
+            extra_keys: Vec::new(),
+            forward_agent: false,
             created_at: Utc::now(),
             last_used: None,
         });
@@ -317,5 +424,47 @@ mod tests {
         let report2 = import_vault_from_file(&storage_b, &export_file, false).unwrap();
         assert_eq!(report2.added, 0);
         assert_eq!(report2.skipped, 1);
+    }
+
+    #[test]
+    fn master_password_enable_and_disable_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::with_dir(dir.path().to_path_buf()).unwrap();
+
+        let mut vault = VaultData::default();
+        vault.hosts.push(SshHost {
+            name: "pc".into(),
+            host: "10.0.0.2".into(),
+            port: 22,
+            username: "root".into(),
+            auth: AuthMethod::Password {
+                password: "secret".into(),
+            },
+            group: None,
+            note: None,
+            proxy_jump: None,
+            local_forwards: Vec::new(),
+            extra_keys: Vec::new(),
+            forward_agent: false,
+            created_at: Utc::now(),
+            last_used: None,
+        });
+        storage.save_vault(&vault).unwrap();
+        assert!(!storage.is_master_password_enabled());
+        assert!(storage.key_path().exists());
+
+        // Enable master password -> v2 vault, .vault.key removed
+        storage.enable_master_password("mon-super-mdp").unwrap();
+        assert!(storage.is_master_password_enabled());
+        assert!(!storage.key_path().exists());
+        let reloaded = storage.load_vault().unwrap();
+        assert_eq!(reloaded.hosts.len(), 1);
+
+        // Disable master password -> back to v1 automatic mode
+        storage.disable_master_password().unwrap();
+        assert!(!storage.is_master_password_enabled());
+        assert!(storage.key_path().exists());
+        let reloaded2 = storage.load_vault().unwrap();
+        assert_eq!(reloaded2.hosts.len(), 1);
     }
 }

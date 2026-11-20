@@ -145,45 +145,146 @@ pub async fn test_tcp_connection(host: &str, port: u16) -> Result<Duration> {
 }
 
 /// Opens an authenticated SSH session reusable for interactive shells or SFTP.
+/// Supports `ProxyJump` (bastion) referencing either a saved `ssha` host name or `user@host[:port]`.
 pub(crate) async fn connect_and_authenticate(
     host: &SshHost,
     storage: Arc<Storage>,
 ) -> Result<client::Handle<SshClientHandler>> {
-    let config = Arc::new(client::Config {
-        inactivity_timeout: None,
-        keepalive_interval: Some(Duration::from_secs(30)),
-        keepalive_max: 3,
-        nodelay: true,
-        ..Default::default()
-    });
+    connect_with_depth(host, storage, 0).await
+}
 
-    let handler = SshClientHandler {
-        host_id: host.host_key_id(),
-        storage,
+fn connect_with_depth<'a>(
+    host: &'a SshHost,
+    storage: Arc<Storage>,
+    depth: u8,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<SshClientHandler>>> + 'a>> {
+    Box::pin(async move {
+        if depth > 4 {
+            bail!("Boucle détectée dans ProxyJump (profondeur maximale dépassée).");
+        }
+
+        let config = Arc::new(client::Config {
+            inactivity_timeout: None,
+            keepalive_interval: Some(Duration::from_secs(30)),
+            keepalive_max: 3,
+            nodelay: true,
+            ..Default::default()
+        });
+
+        let handler = SshClientHandler {
+            host_id: host.host_key_id(),
+            storage: Arc::clone(&storage),
+        };
+
+        let mut session = if let Some(ref jump_spec) = host.proxy_jump {
+            let jump_host = resolve_jump_host(jump_spec, &storage, &host.username)?;
+            eprintln!(
+                "\x1b[2m[ssha] Rebond ProxyJump via {} ({})...\x1b[0m",
+                jump_host.name,
+                jump_host.endpoint_display()
+            );
+            let jump_session = connect_with_depth(&jump_host, Arc::clone(&storage), depth + 1).await?;
+            let tunnel = jump_session
+                .channel_open_direct_tcpip(
+                    host.host.as_str(),
+                    host.port as u32,
+                    "127.0.0.1",
+                    0,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "Impossible d'ouvrir le tunnel ProxyJump vers {}:{} via {}",
+                        host.host, host.port, jump_host.name
+                    )
+                })?;
+
+            tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                client::connect_stream(config, tunnel.into_stream(), handler),
+            )
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Délai de connexion dépassé ({} s) vers {}:{} via ProxyJump.",
+                    CONNECT_TIMEOUT.as_secs(),
+                    host.host,
+                    host.port
+                )
+            })?
+            .with_context(|| {
+                format!(
+                    "Impossible d'établir la session SSH vers {}:{} via ProxyJump",
+                    host.host, host.port
+                )
+            })?
+        } else {
+            tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                client::connect(config, (host.host.as_str(), host.port), handler),
+            )
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Délai de connexion dépassé ({} s) vers {}:{}.",
+                    CONNECT_TIMEOUT.as_secs(),
+                    host.host,
+                    host.port
+                )
+            })?
+            .with_context(|| {
+                format!(
+                    "Impossible de se connecter à {}:{}",
+                    host.host, host.port
+                )
+            })?
+        };
+
+        authenticate(&mut session, host).await?;
+        Ok(session)
+    })
+}
+
+fn resolve_jump_host(spec: &str, storage: &Storage, default_user: &str) -> Result<SshHost> {
+    let trimmed = spec.trim();
+    if let Ok(vault) = storage.load_vault() {
+        if let Some(found) = vault.find_by_name(trimmed) {
+            return Ok(found.clone());
+        }
+    }
+
+    // Parse inline `[user@]host[:port]`
+    let (user, host_port) = match trimmed.split_once('@') {
+        Some((u, hp)) => (u.to_string(), hp),
+        None => (default_user.to_string(), trimmed),
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) => (
+            h.trim_matches(['[', ']']).to_string(),
+            p.parse::<u16>()
+                .with_context(|| format!("Port invalide dans ProxyJump '{}'", spec))?,
+        ),
+        None => (host_port.to_string(), 22),
     };
 
-    let mut session = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        client::connect(config, (host.host.as_str(), host.port), handler),
-    )
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "Délai de connexion dépassé ({} s) vers {}:{}.",
-            CONNECT_TIMEOUT.as_secs(),
-            host.host,
-            host.port
-        )
-    })?
-    .with_context(|| {
-        format!(
-            "Impossible de se connecter à {}:{}",
-            host.host, host.port
-        )
-    })?;
-
-    authenticate(&mut session, host).await?;
-    Ok(session)
+    Ok(SshHost {
+        name: trimmed.to_string(),
+        host,
+        port,
+        username: user,
+        auth: AuthMethod::Key {
+            path: "~/.ssh/id_ed25519".to_string(),
+            passphrase: None,
+        },
+        group: None,
+        note: None,
+        proxy_jump: None,
+        local_forwards: Vec::new(),
+        extra_keys: vec!["~/.ssh/id_rsa".to_string()],
+        forward_agent: false,
+        created_at: Utc::now(),
+        last_used: None,
+    })
 }
 
 /// Executes a single non-interactive command over an authenticated SSH session,
@@ -226,7 +327,8 @@ pub(crate) async fn exec_remote_command(
     Ok((exit_code, String::from_utf8_lossy(&output).trim().to_string()))
 }
 
-/// Establishes an interactive SSH terminal session with automatic authentication.
+/// Establishes an interactive SSH terminal session with automatic authentication,
+/// optional ProxyJump bastion, and active LocalForward TCP tunnels.
 pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Result<u32> {
     eprintln!(
         "\x1b[1;36m[ssha]\x1b[0m Connexion à \x1b[1m{}\x1b[0m ({})...",
@@ -234,7 +336,46 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
         host.endpoint_display()
     );
 
-    let session = connect_and_authenticate(host, storage).await?;
+    let session = Arc::new(connect_and_authenticate(host, storage).await?);
+
+    // Start any configured LocalForward TCP tunnels
+    let mut forward_tasks = Vec::new();
+    for spec in &host.local_forwards {
+        let bind_target = format!("{}:{}", spec.bind_addr, spec.local_port);
+        match tokio::net::TcpListener::bind(&bind_target).await {
+            Ok(listener) => {
+                eprintln!("\x1b[2m[ssha] Tunnel local actif : {spec}\x1b[0m");
+                let sess = Arc::clone(&session);
+                let remote_host = spec.remote_host.clone();
+                let remote_port = spec.remote_port as u32;
+                forward_tasks.push(tokio::spawn(async move {
+                    while let Ok((mut local_stream, peer)) = listener.accept().await {
+                        let sess = Arc::clone(&sess);
+                        let rh = remote_host.clone();
+                        tokio::spawn(async move {
+                            if let Ok(channel) = sess
+                                .channel_open_direct_tcpip(
+                                    rh.as_str(),
+                                    remote_port,
+                                    peer.ip().to_string(),
+                                    peer.port() as u32,
+                                )
+                                .await
+                            {
+                                let mut ssh_stream = channel.into_stream();
+                                let _ = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream).await;
+                            }
+                        });
+                    }
+                }));
+            }
+            Err(e) => {
+                eprintln!(
+                    "\x1b[1;33m[ssha]\x1b[0m Impossible d'ouvrir le tunnel local {spec} : {e}"
+                );
+            }
+        }
+    }
 
     let mut channel = session
         .channel_open_session()
@@ -258,6 +399,10 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
         .context("Impossible de démarrer le shell distant")?;
 
     let exit_code = run_interactive_loop(&mut channel).await?;
+
+    for task in forward_tasks {
+        task.abort();
+    }
 
     let _ = session
         .disconnect(Disconnect::ByApplication, "", "fr")
@@ -322,14 +467,6 @@ async fn authenticate(
             }
         }
         AuthMethod::Key { path, passphrase } => {
-            let expanded = expand_tilde(path);
-            let key_pair = load_secret_key(&expanded, passphrase.as_deref()).with_context(|| {
-                format!(
-                    "Impossible de charger la clé privée SSH '{}'. Vérifie le chemin ou la passphrase.",
-                    expanded.display()
-                )
-            })?;
-
             let best_rsa_hash = session
                 .best_supported_rsa_hash()
                 .await
@@ -337,22 +474,55 @@ async fn authenticate(
                 .flatten()
                 .flatten();
 
-            let auth_res = session
-                .authenticate_publickey(
-                    &host.username,
-                    PrivateKeyWithHashAlg::new(Arc::new(key_pair), best_rsa_hash),
-                )
-                .await
-                .context("Erreur pendant l'authentification par clé SSH")?;
+            let mut candidate_keys: Vec<(&str, Option<&str>)> =
+                vec![(path.as_str(), passphrase.as_deref())];
+            for extra in &host.extra_keys {
+                candidate_keys.push((extra.as_str(), None));
+            }
 
-            if !auth_res.success() {
-                bail!(
+            let mut last_err: Option<anyhow::Error> = None;
+            for (key_path, key_pass) in candidate_keys {
+                let expanded = expand_tilde(key_path);
+                let key_pair = match load_secret_key(&expanded, key_pass) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        last_err = Some(anyhow!(
+                            "Impossible de charger la clé privée SSH '{}' ({e}).",
+                            expanded.display()
+                        ));
+                        continue;
+                    }
+                };
+
+                match session
+                    .authenticate_publickey(
+                        &host.username,
+                        PrivateKeyWithHashAlg::new(Arc::new(key_pair), best_rsa_hash),
+                    )
+                    .await
+                {
+                    Ok(auth_res) if auth_res.success() => return Ok(()),
+                    Ok(_) => {
+                        last_err = Some(anyhow!(
+                            "Clé SSH '{}' refusée pour {}@{}.",
+                            expanded.display(),
+                            host.username,
+                            host.host
+                        ));
+                    }
+                    Err(e) => {
+                        last_err = Some(anyhow!("Erreur d'authentification par clé SSH : {e}"));
+                    }
+                }
+            }
+
+            Err(last_err.unwrap_or_else(|| {
+                anyhow!(
                     "Authentification par clé SSH refusée pour {}@{}.",
                     host.username,
                     host.host
-                );
-            }
-            Ok(())
+                )
+            }))
         }
     }
 }
@@ -774,6 +944,10 @@ mod tests {
             },
             group: None,
             note: None,
+            proxy_jump: None,
+            local_forwards: Vec::new(),
+            extra_keys: Vec::new(),
+            forward_agent: false,
             created_at: Utc::now(),
             last_used: None,
         };

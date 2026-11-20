@@ -9,12 +9,94 @@ use zeroize::Zeroizing;
 
 const VAULT_MAGIC: &[u8; 4] = b"SSHA";
 const VAULT_FORMAT_VERSION: u8 = 1;
+const VAULT_FORMAT_MASTER_V2: u8 = 2;
 const VAULT_AAD: &[u8] = b"SSHA-VAULT-V1";
+const VAULT_AAD_V2: &[u8] = b"SSHA-VAULT-V2";
 const NONCE_LEN: usize = 12;
+const SALT_LEN: usize = 16;
 const KEY_LEN: usize = 32;
 
 #[cfg(windows)]
 const DPAPI_PREFIX: &[u8; 6] = b"DPAPI1";
+
+/// Returns true if the encrypted vault blob uses optional Master Password mode (format v2).
+pub fn is_master_password_vault(data: &[u8]) -> bool {
+    data.len() >= 5 && &data[0..4] == VAULT_MAGIC && data[4] == VAULT_FORMAT_MASTER_V2
+}
+
+fn derive_master_key(password: &str, salt: &[u8; SALT_LEN]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    argon2::Argon2::default()
+        .hash_password_into(password.as_bytes(), salt, &mut *key)
+        .map_err(|e| anyhow!("Erreur de dérivation Argon2id : {e}"))?;
+    Ok(key)
+}
+
+/// Encrypts plaintext using AES-256-GCM with an Argon2id key derived from the user's master password.
+pub fn encrypt_vault_with_password(plaintext: &[u8], password: &str) -> Result<Vec<u8>> {
+    let generated_salt = Key::<Aes256Gcm>::generate();
+    let mut salt = [0u8; SALT_LEN];
+    salt.copy_from_slice(&generated_salt.as_slice()[..SALT_LEN]);
+
+    let key = derive_master_key(password, &salt)?;
+    let cipher = Aes256Gcm::new_from_slice(&*key)
+        .map_err(|e| anyhow!("Impossible d'initialiser le chiffrement AES-256-GCM: {e}"))?;
+
+    let nonce = Nonce::generate();
+    let ciphertext = cipher
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad: VAULT_AAD_V2,
+            },
+        )
+        .map_err(|e| anyhow!("Erreur lors du chiffrement du coffre-fort: {e}"))?;
+
+    let mut output = Vec::with_capacity(4 + 1 + SALT_LEN + NONCE_LEN + ciphertext.len());
+    output.extend_from_slice(VAULT_MAGIC);
+    output.push(VAULT_FORMAT_MASTER_V2);
+    output.extend_from_slice(&salt);
+    output.extend_from_slice(nonce.as_slice());
+    output.extend_from_slice(&ciphertext);
+    Ok(output)
+}
+
+/// Decrypts a v2 master-password-protected `vault.enc` payload.
+pub fn decrypt_vault_with_password(data: &[u8], password: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let header_len = 4 + 1 + SALT_LEN + NONCE_LEN;
+    if data.len() < header_len + 16 {
+        bail!("Fichier coffre-fort invalide ou tronqué.");
+    }
+    if &data[0..4] != VAULT_MAGIC || data[4] != VAULT_FORMAT_MASTER_V2 {
+        bail!("Format de coffre-fort protégé par mot de passe maître invalide.");
+    }
+
+    let salt: [u8; SALT_LEN] = data[5..5 + SALT_LEN]
+        .try_into()
+        .map_err(|_| anyhow!("Sel Argon2 invalide"))?;
+    let nonce_bytes: [u8; NONCE_LEN] = data[5 + SALT_LEN..header_len]
+        .try_into()
+        .map_err(|_| anyhow!("Nonce invalide"))?;
+    let nonce = Nonce::from(nonce_bytes);
+    let ciphertext = &data[header_len..];
+
+    let key = derive_master_key(password, &salt)?;
+    let cipher = Aes256Gcm::new_from_slice(&*key)
+        .map_err(|e| anyhow!("Impossible d'initialiser le déchiffrement AES-256-GCM: {e}"))?;
+
+    let plaintext = cipher
+        .decrypt(
+            &nonce,
+            Payload {
+                msg: ciphertext,
+                aad: VAULT_AAD_V2,
+            },
+        )
+        .map_err(|_| anyhow!("Mot de passe maître incorrect (ou coffre-fort altéré)."))?;
+
+    Ok(Zeroizing::new(plaintext))
+}
 
 /// Encrypts plaintext using AES-256-GCM with an automatically managed 256-bit key.
 pub fn encrypt_vault(plaintext: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
@@ -293,5 +375,17 @@ mod tests {
         let last = encrypted.len() - 1;
         encrypted[last] ^= 0xFF;
         assert!(decrypt_vault(&encrypted, &key).is_err());
+    }
+
+    #[test]
+    fn master_password_roundtrip_and_wrong_password_rejected() {
+        let plaintext = b"{\"hosts\":[{\"name\":\"srv\"}]}";
+        let enc = encrypt_vault_with_password(plaintext, "mon-mdp-maitre").unwrap();
+        assert!(is_master_password_vault(&enc));
+
+        let dec = decrypt_vault_with_password(&enc, "mon-mdp-maitre").unwrap();
+        assert_eq!(dec.as_slice(), plaintext);
+
+        assert!(decrypt_vault_with_password(&enc, "mauvais-mdp").is_err());
     }
 }

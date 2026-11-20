@@ -16,18 +16,36 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            target: ""
             bin: target/release/ssha
             asset: ssha-linux-x86_64
           - os: windows-latest
+            target: ""
             bin: target/release/ssha.exe
             asset: ssha-windows-x86_64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: target/aarch64-apple-darwin/release/ssha
+            asset: ssha-macos-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bin: target/x86_64-apple-darwin/release/ssha
+            asset: ssha-macos-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build release
-        run: cargo build --release
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --release --target "${{ matrix.target }}"
+          else
+            cargo build --release
+          fi
       - name: Rename artifact
         shell: bash
         run: cp "${{ matrix.bin }}" "${{ matrix.asset }}"

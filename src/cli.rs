@@ -1,9 +1,10 @@
 use crate::crypto::protection_summary;
 use crate::files_tui;
-use crate::models::{format_relative_time, AuthMethod, SshHost};
+use crate::models::{format_relative_time, AuthMethod, LocalForwardSpec, SshHost};
 use crate::picker::{self, PickerResult};
 use crate::sftp::{self, SftpClient};
 use crate::ssh;
+use crate::ssh_config;
 use crate::storage::{export_vault_to_file, import_vault_from_file, Storage};
 use anyhow::{bail, Result};
 use chrono::Utc;
@@ -15,8 +16,8 @@ use std::sync::Arc;
 #[command(
     name = "ssha",
     version,
-    about = "Gestionnaire de connexions SSH 100% CLI avec coffre-fort chiffré automatique",
-    long_about = "Lance `ssha` sans argument pour ouvrir l'interface interactive (avec /new, /files, /export, /import, /edit, /del),\nou passe directement le nom d'une machine (`ssha mon-pc`) pour t'y connecter instantanément."
+    about = "Gestionnaire de connexions SSH & SFTP 100% CLI avec coffre-fort chiffré (Windows, Linux, macOS)",
+    long_about = "Lance `ssha` sans argument pour ouvrir l'interface interactive (avec /new, /files, /export, /import, /import-ssh),\nou passe directement le nom d'une machine (`ssha mon-pc`) pour t'y connecter instantanément."
 )]
 pub struct Cli {
     /// Nom d'une connexion enregistrée pour s'y connecter directement
@@ -62,7 +63,7 @@ pub enum Commands {
     Put {
         /// Nom / alias de la connexion
         name: String,
-        /// Chemin du fichier ou dossier local (si omis, ouvre la fenêtre Windows/Linux)
+        /// Chemin du fichier ou dossier local (si omis, ouvre la fenêtre Windows/Linux/macOS)
         local: Option<String>,
         /// Dossier ou chemin de destination sur la machine distante (défaut: dossier home distant)
         remote: Option<String>,
@@ -86,6 +87,22 @@ pub enum Commands {
         /// Ne pas écraser les connexions existantes ayant le même nom
         #[arg(long)]
         keep_existing: bool,
+    },
+
+    /// Importer automatiquement les hôtes depuis ~/.ssh/config (OpenSSH)
+    #[command(name = "import-ssh")]
+    ImportSsh {
+        /// Chemin vers le fichier SSH config (défaut: ~/.ssh/config)
+        path: Option<String>,
+        /// Écraser les connexions existantes ayant le même nom
+        #[arg(long)]
+        overwrite: bool,
+    },
+
+    /// Gérer la sécurité du coffre-fort (clé automatique ou mot de passe maître optionnel)
+    Security {
+        #[command(subcommand)]
+        action: SecurityAction,
     },
 
     /// Supprimer une connexion enregistrée
@@ -114,6 +131,16 @@ pub enum Commands {
 
     /// Afficher l'emplacement du coffre-fort chiffré et les infos de sécurité
     Info,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecurityAction {
+    /// Afficher le mode de chiffrement actuel (automatique ou mot de passe maître)
+    Status,
+    /// Activer un mot de passe maître optionnel (Argon2id + AES-256-GCM, coffre-fort portable)
+    EnableMasterPassword,
+    /// Revenir au mode clé automatique sans mot de passe maître
+    DisableMasterPassword,
 }
 
 #[derive(Args, Debug)]
@@ -145,6 +172,14 @@ pub struct NewArgs {
     /// Note / description optionnelle
     #[arg(long)]
     pub note: Option<String>,
+
+    /// Bastion / ProxyJump (nom d'une machine ssha ou user@host[:port])
+    #[arg(short = 'J', long)]
+    pub proxy_jump: Option<String>,
+
+    /// Redirection de port locale (-L local_port:remote_host:remote_port), répétable
+    #[arg(short = 'L', long)]
+    pub local_forward: Vec<String>,
 }
 
 pub fn cmd_new(storage: &Storage, args: NewArgs) -> Result<()> {
@@ -246,6 +281,12 @@ pub fn cmd_new(storage: &Storage, args: NewArgs) -> Result<()> {
         None => non_empty(&prompt_optional("Note (optionnelle)")?),
     };
 
+    let mut local_forwards = Vec::new();
+    for spec_str in &args.local_forward {
+        let spec = LocalForwardSpec::parse(spec_str).map_err(|e| anyhow::anyhow!(e))?;
+        local_forwards.push(spec);
+    }
+
     let entry = SshHost {
         name: name.clone(),
         host,
@@ -254,6 +295,10 @@ pub fn cmd_new(storage: &Storage, args: NewArgs) -> Result<()> {
         auth,
         group,
         note,
+        proxy_jump: args.proxy_jump.and_then(|p| non_empty(&p)),
+        local_forwards,
+        extra_keys: Vec::new(),
+        forward_agent: false,
         created_at: Utc::now(),
         last_used: None,
     };
@@ -634,6 +679,63 @@ pub fn cmd_import(storage: &Storage, input: Option<&str>, keep_existing: bool) -
         "  {} ajoutée(s), {} mise(s) à jour, {} ignorée(s) — chiffrées automatiquement dans vault.enc.",
         report.added, report.updated, report.skipped
     );
+    Ok(())
+}
+
+pub fn cmd_import_ssh(storage: &Storage, path: Option<&str>, overwrite: bool) -> Result<()> {
+    let target_path = match path {
+        Some(p) => sftp::resolve_local_path(p),
+        None => ssh_config::default_ssh_config_path()
+            .ok_or_else(|| anyhow::anyhow!("Impossible de localiser ~/.ssh/config."))?,
+    };
+
+    let report = ssh_config::import_from_ssh_config(storage, &target_path, overwrite)?;
+    println!(
+        "\x1b[1;32m✓\x1b[0m Import OpenSSH terminé depuis \x1b[1m{}\x1b[0m :",
+        target_path.display()
+    );
+    println!(
+        "  {} ajoutée(s), {} mise(s) à jour, {} ignorée(s).",
+        report.added, report.updated, report.skipped
+    );
+    Ok(())
+}
+
+pub fn cmd_security(storage: &Storage, action: SecurityAction) -> Result<()> {
+    match action {
+        SecurityAction::Status => {
+            if storage.is_master_password_enabled() {
+                println!("\x1b[1;32m●\x1b[0m Mode actuel : \x1b[1mMot de passe maître (Argon2id + AES-256-GCM)\x1b[0m");
+                println!("  Ton fichier vault.enc est 100% portable d'une machine à l'autre.");
+            } else {
+                println!("\x1b[1;36m●\x1b[0m Mode actuel : \x1b[1m{}\x1b[0m", protection_summary());
+                println!("  Aucun mot de passe maître requis. Utilise `ssha security enable-master-password` pour l'activer.");
+            }
+        }
+        SecurityAction::EnableMasterPassword => {
+            storage.ensure_unlocked()?;
+            let pw1 = rpassword::prompt_password("Nouveau mot de passe maître : ")?;
+            if pw1.len() < 4 {
+                bail!("Le mot de passe maître doit contenir au moins 4 caractères.");
+            }
+            let pw2 = rpassword::prompt_password("Confirmer le mot de passe maître : ")?;
+            if pw1 != pw2 {
+                bail!("Les mots de passe ne correspondent pas.");
+            }
+            storage.enable_master_password(&pw1)?;
+            println!("\x1b[1;32m✓\x1b[0m Mot de passe maître activé (Argon2id + AES-256-GCM).");
+            println!("  La clé locale automatique a été supprimée ; vault.enc est maintenant portable.");
+        }
+        SecurityAction::DisableMasterPassword => {
+            if !storage.is_master_password_enabled() {
+                println!("Le mode clé automatique est déjà actif.");
+                return Ok(());
+            }
+            storage.ensure_unlocked()?;
+            storage.disable_master_password()?;
+            println!("\x1b[1;32m✓\x1b[0m Retour au mode clé automatique ({}).", protection_summary());
+        }
+    }
     Ok(())
 }
 

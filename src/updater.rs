@@ -48,10 +48,20 @@ pub fn platform_asset_name() -> Option<&'static str> {
     {
         Some("ssha-linux-aarch64")
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Some("ssha-macos-aarch64")
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        Some("ssha-macos-x86_64")
+    }
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "aarch64")
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64")
     )))]
     {
         None
@@ -228,7 +238,18 @@ fn is_valid_binary_header(header: &[u8]) -> bool {
     {
         header.len() >= 2 && header[0] == b'M' && header[1] == b'Z'
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        header.len() >= 4
+            && matches!(
+                header,
+                [0xcf, 0xfa, 0xed, 0xfe]
+                    | [0xfe, 0xed, 0xfa, 0xcf]
+                    | [0xca, 0xfe, 0xba, 0xbe]
+                    | [0xbe, 0xba, 0xfe, 0xca]
+            )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         header.len() >= 4 && header == b"\x7fELF"
     }

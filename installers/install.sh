@@ -38,11 +38,24 @@ install_from_local_build() {
 }
 
 install_from_release() {
+    OS="$(uname -s)"
     ARCH="$(uname -m)"
-    case "$ARCH" in
-        x86_64|amd64) ASSET="ssha-linux-x86_64" ;;
-        aarch64|arm64) ASSET="ssha-linux-aarch64" ;;
-        *) error "Architecture non supportée pour les binaires précompilés : $ARCH. Compile depuis les sources avec cargo." ;;
+    case "$OS" in
+        Linux)
+            case "$ARCH" in
+                x86_64|amd64) ASSET="ssha-linux-x86_64" ;;
+                aarch64|arm64) ASSET="ssha-linux-aarch64" ;;
+                *) error "Architecture Linux non supportée : $ARCH. Compile depuis les sources avec cargo." ;;
+            esac
+            ;;
+        Darwin)
+            case "$ARCH" in
+                arm64|aarch64) ASSET="ssha-macos-aarch64" ;;
+                x86_64) ASSET="ssha-macos-x86_64" ;;
+                *) error "Architecture macOS non supportée : $ARCH. Compile depuis les sources avec cargo." ;;
+            esac
+            ;;
+        *) error "Système non supporté par ce script : $OS." ;;
     esac
 
     URL="https://github.com/$REPO/releases/latest/download/$ASSET"
