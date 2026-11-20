@@ -1,6 +1,6 @@
 [package]
 name = "ssha"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Gestionnaire de connexions SSH 100% CLI avec coffre-fort chiffré automatique (Windows & Linux)"
 license = "MIT"

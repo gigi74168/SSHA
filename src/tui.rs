@@ -1,4 +1,5 @@
 use crate::models::{format_relative_time, AuthMethod, SshHost, VaultData};
+use crate::ssh::{probe_host, PingState};
 use crate::storage::Storage;
 use anyhow::Result;
 use chrono::Utc;
@@ -15,8 +16,10 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
 };
 use ratatui::{Frame, Terminal};
+use std::collections::HashMap;
 use std::io;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 pub enum TuiAction {
     Connect(SshHost),
@@ -62,6 +65,11 @@ const SLASH_COMMANDS: &[SlashCommandDef] = &[
         cmd: "/test",
         usage: "/test [nom]",
         desc: "Tester la connexion réseau (ping TCP)",
+    },
+    SlashCommandDef {
+        cmd: "/refresh",
+        usage: "/refresh",
+        desc: "Actualiser le statut UP/DOWN de toutes les machines",
     },
     SlashCommandDef {
         cmd: "/clear",
@@ -360,6 +368,8 @@ fn default_username() -> String {
         .unwrap_or_else(|_| "root".to_string())
 }
 
+const PING_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+
 struct AppState {
     vault: VaultData,
     input: String,
@@ -367,6 +377,10 @@ struct AppState {
     slash_selected: usize,
     modal: Modal,
     status: Option<StatusMessage>,
+    ping_states: HashMap<String, PingState>,
+    ping_tx: Option<mpsc::Sender<(String, PingState)>>,
+    ping_rx: Option<mpsc::Receiver<(String, PingState)>>,
+    last_ping_all: Instant,
 }
 
 impl AppState {
@@ -386,7 +400,82 @@ impl AppState {
             slash_selected: 0,
             modal: Modal::None,
             status,
+            ping_states: HashMap::new(),
+            ping_tx: None,
+            ping_rx: None,
+            last_ping_all: Instant::now(),
         }
+    }
+
+    fn enable_live_ping(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.ping_tx = Some(tx);
+        self.ping_rx = Some(rx);
+        self.trigger_ping_all(true);
+    }
+
+    fn trigger_ping_all(&mut self, mark_checking: bool) {
+        let Some(ref tx) = self.ping_tx else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        self.last_ping_all = Instant::now();
+        for h in &self.vault.hosts {
+            if mark_checking || !self.ping_states.contains_key(&h.name) {
+                self.ping_states.insert(h.name.clone(), PingState::Checking);
+            }
+            let tx = tx.clone();
+            let name = h.name.clone();
+            let host = h.host.clone();
+            let port = h.port;
+            handle.spawn(async move {
+                let state = probe_host(&host, port).await;
+                let _ = tx.send((name, state));
+            });
+        }
+    }
+
+    fn trigger_ping_one(&mut self, h: &SshHost) {
+        let Some(ref tx) = self.ping_tx else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+
+        self.ping_states.insert(h.name.clone(), PingState::Checking);
+        let tx = tx.clone();
+        let name = h.name.clone();
+        let host = h.host.clone();
+        let port = h.port;
+        handle.spawn(async move {
+            let state = probe_host(&host, port).await;
+            let _ = tx.send((name, state));
+        });
+    }
+
+    fn poll_ping_results(&mut self) {
+        if let Some(ref rx) = self.ping_rx {
+            while let Ok((name, state)) = rx.try_recv() {
+                self.ping_states.insert(name, state);
+            }
+        }
+        if self.ping_tx.is_some()
+            && !self.vault.hosts.is_empty()
+            && self.last_ping_all.elapsed() >= PING_REFRESH_INTERVAL
+        {
+            self.trigger_ping_all(false);
+        }
+    }
+
+    fn ping_state_for(&self, name: &str) -> PingState {
+        self.ping_states
+            .get(name)
+            .copied()
+            .unwrap_or(PingState::Checking)
     }
 
     fn is_slash_mode(&self) -> bool {
@@ -479,15 +568,17 @@ pub fn run_tui(
 ) -> Result<TuiAction> {
     let vault = storage.load_vault()?;
     let mut app = AppState::new(vault, initial_status);
+    app.enable_live_ping();
 
     let mut terminal = TuiGuard::enter()?;
     let _guard = TuiGuard;
 
     loop {
+        app.poll_ping_results();
         app.clamp_selection();
         terminal.draw(|frame| draw_ui(frame, &app))?;
 
-        if !event::poll(Duration::from_millis(100))? {
+        if !event::poll(Duration::from_millis(80))? {
             continue;
         }
 
@@ -589,6 +680,11 @@ fn handle_main_key(
                 app.modal = Modal::Help;
                 return Ok(None);
             }
+            KeyCode::Char('r') => {
+                app.trigger_ping_all(true);
+                app.set_status(StatusLevel::Info, "Vérification UP/DOWN de toutes les machines...");
+                return Ok(None);
+            }
             KeyCode::Char('u') => {
                 app.input.clear();
                 return Ok(None);
@@ -603,6 +699,10 @@ fn handle_main_key(
         }
         KeyCode::F(2) => {
             app.modal = Modal::Form(HostForm::new_empty());
+        }
+        KeyCode::F(5) => {
+            app.trigger_ping_all(true);
+            app.set_status(StatusLevel::Info, "Vérification UP/DOWN de toutes les machines...");
         }
         KeyCode::Esc => {
             if !app.input.is_empty() {
@@ -696,6 +796,7 @@ fn execute_slash_command(app: &mut AppState, _storage: &Storage) -> Result<Optio
         "/del" | "/delete" | "/rm" | "/remove" => "/del",
         "/connect" | "/c" | "/open" => "/connect",
         "/test" | "/ping" => "/test",
+        "/refresh" | "/r" => "/refresh",
         "/clear" => "/clear",
         "/help" | "/?" => "/help",
         "/quit" | "/exit" | "/q" => "/quit",
@@ -786,6 +887,10 @@ fn execute_slash_command(app: &mut AppState, _storage: &Storage) -> Result<Optio
             } else {
                 app.set_status(StatusLevel::Error, "Aucune connexion à tester.");
             }
+        }
+        "/refresh" => {
+            app.trigger_ping_all(true);
+            app.set_status(StatusLevel::Info, "Vérification UP/DOWN de toutes les machines...");
         }
         "/clear" => {
             app.status = None;
@@ -880,6 +985,7 @@ fn try_submit_form(app: &mut AppState, storage: &Storage) -> Result<()> {
     match built {
         (original_name, Ok(new_host)) => {
             let saved_name = new_host.name.clone();
+            let host_to_ping = new_host.clone();
             let was_edit = original_name.is_some();
 
             if let Some(orig) = original_name {
@@ -896,6 +1002,7 @@ fn try_submit_form(app: &mut AppState, storage: &Storage) -> Result<()> {
             }
 
             storage.save_vault(&app.vault)?;
+            app.trigger_ping_one(&host_to_ping);
             app.modal = Modal::None;
             app.set_status(
                 StatusLevel::Success,
@@ -1084,6 +1191,7 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
         Cell::from("Auth"),
         Cell::from("Groupe"),
         Cell::from("Dernière connexion"),
+        Cell::from(Line::from("État").alignment(Alignment::Right)),
     ])
     .style(
         Style::default()
@@ -1105,6 +1213,38 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
             };
             let auth_cell = Cell::from(format!("● {}", h.auth.label())).style(auth_style);
 
+            let ping = app.ping_state_for(&h.name);
+            let (status_label, status_style, dot_style) = match ping {
+                PingState::Up(_) => (
+                    "UP",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Green),
+                ),
+                PingState::Down => (
+                    "DOWN",
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red),
+                ),
+                PingState::Checking => (
+                    "...",
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Yellow),
+                ),
+            };
+
+            let addr_cell = Cell::from(Line::from(vec![
+                Span::styled(h.endpoint_display(), Style::default().fg(Color::Gray)),
+                Span::raw("  "),
+                Span::styled(status_label, status_style),
+            ]));
+
+            let dot_cell =
+                Cell::from(Line::from(Span::styled("● ", dot_style)).alignment(Alignment::Right));
+
             Row::new(vec![
                 Cell::from(format!("{prefix}{}", h.name)).style(if selected {
                     Style::default()
@@ -1113,22 +1253,24 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
                 } else {
                     Style::default().fg(Color::White)
                 }),
-                Cell::from(h.endpoint_display()).style(Style::default().fg(Color::Gray)),
+                addr_cell,
                 auth_cell,
                 Cell::from(h.group.as_deref().unwrap_or("—"))
                     .style(Style::default().fg(Color::Magenta)),
                 Cell::from(format_relative_time(h.last_used))
                     .style(Style::default().fg(Color::DarkGray)),
+                dot_cell,
             ])
         })
         .collect();
 
     let widths = [
-        Constraint::Percentage(22),
-        Constraint::Percentage(34),
-        Constraint::Length(9),
-        Constraint::Percentage(15),
         Constraint::Percentage(20),
+        Constraint::Percentage(37),
+        Constraint::Length(9),
+        Constraint::Percentage(13),
+        Constraint::Percentage(17),
+        Constraint::Length(5),
     ];
 
     let table = Table::new(rows, widths)
@@ -1163,6 +1305,21 @@ fn draw_status_strip(frame: &mut Frame, area: Rect, app: &AppState) {
         ]));
     } else if let Some(host) = app.selected_host() {
         let endpoint = host.endpoint_display();
+        let ping_span = match app.ping_state_for(&host.name) {
+            PingState::Up(ms) => Span::styled(
+                format!("  │  ● UP ({ms} ms)"),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            PingState::Down => Span::styled(
+                "  │  ● DOWN",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            PingState::Checking => {
+                Span::styled("  │  ● ...", Style::default().fg(Color::Yellow))
+            }
+        };
         let note_str = host
             .note
             .as_deref()
@@ -1172,6 +1329,7 @@ fn draw_status_strip(frame: &mut Frame, area: Rect, app: &AppState) {
             Span::styled(" Sélection : ", Style::default().fg(Color::DarkGray)),
             Span::styled(host.name, Style::default().fg(Color::Cyan)),
             Span::raw(format!(" ({endpoint})")),
+            ping_span,
             Span::styled(note_str, Style::default().fg(Color::DarkGray)),
         ]));
     }

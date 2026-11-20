@@ -22,9 +22,10 @@ Enregistre tes machines une seule fois (ex. `192.168.1.192` + mot de passe ou cl
 ## Fonctionnalités
 
 - **Interface 100 % CLI interactive (`ssha`)** :
+  - Statut en direct **`UP` / `DOWN`** à côté de chaque IP + voyant **● vert / rouge** tout à droite (vérification non bloquante en parallèle, actualisée automatiquement toutes les 15 s ou via `Ctrl+R` / `F5` / `/refresh`)
   - Liste filtrable en temps réel (tape un nom, une IP ou un groupe)
-  - Commandes slash intégrées avec autocomplétion (`Tab`) : `/new`, `/files`, `/edit`, `/del`, `/connect`, `/test`, `/help`, `/quit`
-  - Raccourcis clavier rapides (`↑`/`↓`, `Entrée`, `Ctrl+F`, `Ctrl+N`, `Ctrl+E`, `Ctrl+D`, `Ctrl+T`, `Esc`)
+  - Commandes slash intégrées avec autocomplétion (`Tab`) : `/new`, `/files`, `/edit`, `/del`, `/connect`, `/test`, `/refresh`, `/help`, `/quit`
+  - Raccourcis clavier rapides (`↑`/`↓`, `Entrée`, `Ctrl+F`, `Ctrl+N`, `Ctrl+E`, `Ctrl+D`, `Ctrl+T`, `Ctrl+R`, `Esc`)
 - **Gestionnaire de fichiers à distance (SFTP intégré)** :
   - Parcours des dossiers distants, filtrage live, fichiers cachés (`Ctrl+H`) et aperçu rapide des fichiers texte (`Entrée`)
   - **Téléchargement** de fichiers ou dossiers complets (récursif) vers ton PC (`Ctrl+D` ou `/download` ou `ssha get`)

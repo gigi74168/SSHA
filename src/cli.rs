@@ -248,7 +248,7 @@ pub fn cmd_new(storage: &Storage, args: NewArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_list(storage: &Storage) -> Result<()> {
+pub async fn cmd_list(storage: &Storage) -> Result<()> {
     let vault = storage.load_vault()?;
     if vault.hosts.is_empty() {
         println!("Aucune connexion SSH enregistrée.");
@@ -256,19 +256,47 @@ pub fn cmd_list(storage: &Storage) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "\x1b[1;36m{:<18} {:<30} {:<8} {:<14} {}\x1b[0m",
-        "NOM", "ADRESSE", "AUTH", "GROUPE", "DERNIÈRE CONNEXION"
-    );
-    println!("{}", "─".repeat(88));
+    // Probe all hosts concurrently
+    let mut handles = Vec::with_capacity(vault.hosts.len());
     for h in &vault.hosts {
+        let host = h.host.clone();
+        let port = h.port;
+        handles.push(tokio::spawn(async move { ssh::probe_host(&host, port).await }));
+    }
+
+    let mut states = Vec::with_capacity(handles.len());
+    for handle in handles {
+        states.push(handle.await.unwrap_or(ssh::PingState::Down));
+    }
+
+    println!(
+        "\x1b[1;36m{:<18} {:<34} {:<8} {:<14} {:<18} {}\x1b[0m",
+        "NOM", "ADRESSE", "AUTH", "GROUPE", "DERNIÈRE CONNEXION", "ÉTAT"
+    );
+    println!("{}", "─".repeat(98));
+    for (h, st) in vault.hosts.iter().zip(states.iter()) {
+        let (tag, dot) = match st {
+            ssh::PingState::Up(_) => ("\x1b[1;32mUP\x1b[0m", "\x1b[1;32m●\x1b[0m"),
+            ssh::PingState::Down => ("\x1b[1;31mDOWN\x1b[0m", "\x1b[1;31m●\x1b[0m"),
+            ssh::PingState::Checking => ("\x1b[2m...\x1b[0m", "\x1b[33m●\x1b[0m"),
+        };
+        let ep = h.endpoint_display();
+        let tag_plain_len = match st {
+            ssh::PingState::Up(_) => 2,
+            ssh::PingState::Down => 4,
+            ssh::PingState::Checking => 3,
+        };
+        let pad = 34usize.saturating_sub(ep.chars().count() + 2 + tag_plain_len);
         println!(
-            "{:<18} {:<30} {:<8} {:<14} {}",
+            "{:<18} {}  {}{} {:<8} {:<14} {:<18}   {}",
             h.name,
-            h.endpoint_display(),
+            ep,
+            tag,
+            " ".repeat(pad),
             h.auth.label(),
             h.group.as_deref().unwrap_or("—"),
-            format_relative_time(h.last_used)
+            format_relative_time(h.last_used),
+            dot
         );
     }
     Ok(())

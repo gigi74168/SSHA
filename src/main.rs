@@ -43,7 +43,7 @@ async fn run() -> Result<i32> {
     if let Some(cmd) = cli.command {
         match cmd {
             Commands::New(args) => cli::cmd_new(&storage, args)?,
-            Commands::List => cli::cmd_list(&storage)?,
+            Commands::List => cli::cmd_list(&storage).await?,
             Commands::Files { name, path } => {
                 cli::cmd_files(storage, &name, path.as_deref()).await?
             }

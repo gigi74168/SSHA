@@ -113,6 +113,27 @@ impl client::Handler for SshClientHandler {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PingState {
+    Checking,
+    Up(u128),
+    Down,
+}
+
+/// Fast non-blocking reachability check (1.5s timeout) returning Up(rtt_ms) or Down.
+pub async fn probe_host(host: &str, port: u16) -> PingState {
+    let start = Instant::now();
+    match tokio::time::timeout(
+        Duration::from_millis(1500),
+        TcpStream::connect((host, port)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => PingState::Up(start.elapsed().as_millis()),
+        _ => PingState::Down,
+    }
+}
+
 /// Tests TCP reachability to an SSH endpoint and returns the connection latency.
 pub async fn test_tcp_connection(host: &str, port: u16) -> Result<Duration> {
     let start = Instant::now();
