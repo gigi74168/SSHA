@@ -22,9 +22,8 @@ impl Storage {
         let config_dir = if let Ok(custom) = env::var("SSHA_CONFIG_DIR") {
             PathBuf::from(custom)
         } else {
-            let dirs = ProjectDirs::from("", "", "ssha").ok_or_else(|| {
-                anyhow!("Impossible de déterminer le dossier de configuration utilisateur.")
-            })?;
+            let dirs = ProjectDirs::from("", "", "ssha")
+                .ok_or_else(|| anyhow!(t!("storage.err.config_dir").into_owned()))?;
             dirs.config_dir().to_path_buf()
         };
 
@@ -91,25 +90,28 @@ impl Storage {
         }
         let encrypted = fs::read(self.vault_path())?;
         for attempt in 1..=3 {
-            let pw = rpassword::prompt_password("Mot de passe maître ssha : ")?;
+            let pw = rpassword::prompt_password(format!("{} : ", t!("storage.master_prompt")))?;
             match decrypt_vault_with_password(&encrypted, &pw) {
                 Ok(_) => {
                     self.set_cached_master_password(Some(pw));
                     return Ok(());
                 }
                 Err(_) if attempt < 3 => {
-                    eprintln!("\x1b[1;31m✗\x1b[0m Mot de passe maître incorrect ({attempt}/3).");
+                    eprintln!(
+                        "\x1b[1;31m✗\x1b[0m {}",
+                        t!("storage.master_wrong", attempt = attempt)
+                    );
                 }
                 Err(e) => return Err(e),
             }
         }
-        anyhow::bail!("Trop de tentatives de mot de passe maître.")
+        anyhow::bail!(t!("storage.err.master_attempts").into_owned())
     }
 
     /// Migrates the vault to optional Master Password mode (Argon2id + AES-256-GCM) and removes `.vault.key`.
     pub fn enable_master_password(&self, new_password: &str) -> Result<()> {
         if new_password.is_empty() {
-            anyhow::bail!("Le mot de passe maître ne peut pas être vide.");
+            anyhow::bail!(t!("storage.err.master_empty").into_owned());
         }
         let vault = self.load_vault()?;
         self.set_cached_master_password(Some(new_password.to_string()));
@@ -136,7 +138,7 @@ impl Storage {
         }
 
         let encrypted = fs::read(&path)
-            .with_context(|| format!("Impossible de lire le coffre-fort: {}", path.display()))?;
+            .with_context(|| t!("storage.err.read_vault", path = path.display()).into_owned())?;
 
         let plaintext = if is_master_password_vault(&encrypted) {
             if self.cached_master_password().is_none() {
@@ -144,7 +146,7 @@ impl Storage {
             }
             let pw = self
                 .cached_master_password()
-                .ok_or_else(|| anyhow!("Coffre-fort verrouillé par mot de passe maître."))?;
+                .ok_or_else(|| anyhow!(t!("storage.err.locked").into_owned()))?;
             decrypt_vault_with_password(&encrypted, &pw)?
         } else {
             let key = load_or_create_key(&self.key_path())?;
@@ -152,14 +154,13 @@ impl Storage {
         };
 
         let vault: VaultData = serde_json::from_slice(&plaintext)
-            .context("Impossible de désérialiser les données du coffre-fort.")?;
+            .context(t!("storage.err.deserialize").into_owned())?;
         Ok(vault)
     }
 
     pub fn save_vault(&self, vault: &VaultData) -> Result<()> {
         let json = Zeroizing::new(
-            serde_json::to_vec_pretty(vault)
-                .context("Impossible de sérialiser le coffre-fort.")?,
+            serde_json::to_vec_pretty(vault).context(t!("storage.err.serialize").into_owned())?,
         );
 
         let encrypted = if let Some(pw) = self.cached_master_password() {
@@ -176,10 +177,11 @@ impl Storage {
         let tmp_path = self.config_dir.join("vault.enc.tmp");
         write_secret_file(&tmp_path, encrypted)?;
         fs::rename(&tmp_path, self.vault_path()).with_context(|| {
-            format!(
-                "Impossible de remplacer le coffre-fort {}",
-                self.vault_path().display()
+            t!(
+                "storage.err.replace_vault",
+                path = self.vault_path().display()
             )
+            .into_owned()
         })?;
         Ok(())
     }
@@ -190,9 +192,8 @@ impl Storage {
             return Ok(BTreeMap::new());
         }
         let raw = fs::read_to_string(&path)
-            .with_context(|| format!("Impossible de lire {}", path.display()))?;
-        let map: BTreeMap<String, KnownHostEntry> =
-            serde_json::from_str(&raw).unwrap_or_default();
+            .with_context(|| t!("common.err.read", path = path.display()).into_owned())?;
+        let map: BTreeMap<String, KnownHostEntry> = serde_json::from_str(&raw).unwrap_or_default();
         Ok(map)
     }
 
@@ -200,12 +201,43 @@ impl Storage {
         let json = serde_json::to_string_pretty(hosts)?;
         write_secret_file(&self.known_hosts_path(), json.as_bytes())
     }
+
+    pub fn settings_path(&self) -> PathBuf {
+        self.config_dir.join("settings.json")
+    }
+
+    /// Loads non-secret user preferences (language, last seen version). Never fails.
+    pub fn load_settings(&self) -> Settings {
+        fs::read_to_string(self.settings_path())
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        let json = serde_json::to_string_pretty(settings)?;
+        let path = self.settings_path();
+        fs::write(&path, json)
+            .with_context(|| t!("common.err.write", path = path.display()).into_owned())?;
+        Ok(())
+    }
+}
+
+/// Non-secret user preferences stored in `settings.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    /// Interface language code (`en`, `fr`, `ru`, `uk`, `es`, `it`). `None` = not chosen yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Last `ssha` version launched, used to show the "What's new" screen once after an update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_version: Option<String>,
 }
 
 fn ensure_private_dir(path: &Path) -> Result<()> {
     if !path.exists() {
         fs::create_dir_all(path)
-            .with_context(|| format!("Impossible de créer le dossier {}", path.display()))?;
+            .with_context(|| t!("common.err.create_dir", path = path.display()).into_owned())?;
     }
     #[cfg(unix)]
     {
@@ -218,7 +250,10 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
 /// Expands leading `~` to the user's home directory across Linux and Windows.
 pub fn expand_tilde(path: &str) -> PathBuf {
     let trimmed = path.trim();
-    if let Some(rest) = trimmed.strip_prefix("~/").or_else(|| trimmed.strip_prefix("~\\")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
         if let Some(home) = home_dir() {
             return home.join(rest);
         }
@@ -259,7 +294,7 @@ pub fn export_vault_to_file(vault: &VaultData, path: &Path) -> Result<usize> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             fs::create_dir_all(parent).with_context(|| {
-                format!("Impossible de créer le dossier {}", parent.display())
+                t!("common.err.create_dir", path = parent.display()).into_owned()
             })?;
         }
     }
@@ -271,7 +306,7 @@ pub fn export_vault_to_file(vault: &VaultData, path: &Path) -> Result<usize> {
     };
     let json = Zeroizing::new(
         serde_json::to_vec_pretty(&bundle)
-            .context("Impossible de sérialiser la configuration pour l'export.")?,
+            .context(t!("storage.err.serialize_export").into_owned())?,
     );
     write_secret_file(path, &json)?;
     Ok(bundle.hosts.len())
@@ -290,7 +325,7 @@ pub fn import_vault_from_file(
     }
     let raw = Zeroizing::new(
         fs::read(path)
-            .with_context(|| format!("Impossible de lire le fichier {}", path.display()))?,
+            .with_context(|| t!("common.err.read", path = path.display()).into_owned())?,
     );
 
     let imported_hosts: Vec<crate::models::SshHost> =
@@ -299,10 +334,7 @@ pub fn import_vault_from_file(
         } else if let Ok(v) = serde_json::from_slice::<VaultData>(&raw) {
             v.hosts
         } else {
-            anyhow::bail!(
-                "Format de fichier d'import invalide : '{}'. Attendu un export JSON généré par ssha.",
-                path.display()
-            );
+            anyhow::bail!(t!("storage.err.import_format", path = path.display()).into_owned());
         };
 
     let mut vault = storage.load_vault()?;
@@ -341,7 +373,7 @@ mod tests {
         assert!(vault.hosts.is_empty());
 
         vault.hosts.push(SshHost {
-            name: "mon-pc".into(),
+            name: "my-pc".into(),
             host: "192.168.1.192".into(),
             port: 22,
             username: "user".into(),
@@ -354,6 +386,7 @@ mod tests {
             local_forwards: Vec::new(),
             extra_keys: Vec::new(),
             forward_agent: false,
+            monitor: false,
             created_at: Utc::now(),
             last_used: None,
         });
@@ -369,7 +402,7 @@ mod tests {
         // Verify reload succeeds
         let reloaded = storage.load_vault().unwrap();
         assert_eq!(reloaded.hosts.len(), 1);
-        assert_eq!(reloaded.hosts[0].name, "mon-pc");
+        assert_eq!(reloaded.hosts[0].name, "my-pc");
         assert_eq!(reloaded.hosts[0].host, "192.168.1.192");
     }
 
@@ -387,7 +420,7 @@ mod tests {
             port: 2222,
             username: "gigi".into(),
             auth: AuthMethod::Password {
-                password: "mdp-export-test".into(),
+                password: "export-test-password".into(),
             },
             group: Some("Maison".into()),
             note: Some("PC principal".into()),
@@ -395,6 +428,7 @@ mod tests {
             local_forwards: Vec::new(),
             extra_keys: Vec::new(),
             forward_agent: false,
+            monitor: false,
             created_at: Utc::now(),
             last_used: None,
         });
@@ -416,7 +450,7 @@ mod tests {
         assert_eq!(
             vault_b.hosts[0].auth,
             AuthMethod::Password {
-                password: "mdp-export-test".into()
+                password: "export-test-password".into()
             }
         );
 
@@ -446,6 +480,7 @@ mod tests {
             local_forwards: Vec::new(),
             extra_keys: Vec::new(),
             forward_agent: false,
+            monitor: false,
             created_at: Utc::now(),
             last_used: None,
         });
@@ -454,7 +489,9 @@ mod tests {
         assert!(storage.key_path().exists());
 
         // Enable master password -> v2 vault, .vault.key removed
-        storage.enable_master_password("mon-super-mdp").unwrap();
+        storage
+            .enable_master_password("my-master-password")
+            .unwrap();
         assert!(storage.is_master_password_enabled());
         assert!(!storage.key_path().exists());
         let reloaded = storage.load_vault().unwrap();

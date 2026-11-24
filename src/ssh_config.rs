@@ -46,7 +46,9 @@ pub fn parse_ssh_config_str(content: &str) -> Vec<SshHost> {
             let aliases: Vec<String> = value
                 .split_whitespace()
                 .map(|s| s.trim_matches('"').to_string())
-                .filter(|s| !s.is_empty() && !s.contains('*') && !s.contains('?') && !s.starts_with('!'))
+                .filter(|s| {
+                    !s.is_empty() && !s.contains('*') && !s.contains('?') && !s.starts_with('!')
+                })
                 .collect();
             current = Some(RawBlock {
                 aliases,
@@ -117,9 +119,15 @@ pub fn parse_ssh_config_str(content: &str) -> Vec<SshHost> {
             let port = blk.port.unwrap_or(22);
 
             let (primary_key, extra_keys) = if blk.identity_files.is_empty() {
-                ("~/.ssh/id_ed25519".to_string(), vec!["~/.ssh/id_rsa".to_string()])
+                (
+                    "~/.ssh/id_ed25519".to_string(),
+                    vec!["~/.ssh/id_rsa".to_string()],
+                )
             } else {
-                (blk.identity_files[0].clone(), blk.identity_files[1..].to_vec())
+                (
+                    blk.identity_files[0].clone(),
+                    blk.identity_files[1..].to_vec(),
+                )
             };
 
             result.push(SshHost {
@@ -132,11 +140,12 @@ pub fn parse_ssh_config_str(content: &str) -> Vec<SshHost> {
                     passphrase: None,
                 },
                 group: Some("ssh-config".to_string()),
-                note: Some("Importé depuis ~/.ssh/config".to_string()),
+                note: Some(t!("ssh_config.imported_note").into_owned()),
                 proxy_jump: blk.proxy_jump.clone(),
                 local_forwards: blk.local_forwards.clone(),
                 extra_keys,
                 forward_agent: blk.forward_agent,
+                monitor: false,
                 created_at: Utc::now(),
                 last_used: None,
             });
@@ -156,7 +165,7 @@ pub fn import_from_ssh_config(
         bail!("Fichier SSH config introuvable : {}", path.display());
     }
     let content = fs::read_to_string(path)
-        .with_context(|| format!("Impossible de lire {}", path.display()))?;
+        .with_context(|| t!("common.err.read", path = path.display()).into_owned())?;
 
     let parsed = parse_ssh_config_str(&content);
     let mut vault = storage.load_vault()?;

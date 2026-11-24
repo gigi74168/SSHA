@@ -1,0 +1,52 @@
+_version: 2
+# Live CPU/RAM monitoring column.
+
+monitor.connecting:
+  en: "connecting"
+  fr: "connexion"
+  ru: "подключение"
+  uk: "підключення"
+  es: "conectando"
+  it: "connessione"
+monitor.na:
+  en: "n/a (not Linux)"
+  fr: "n/d (pas Linux)"
+  ru: "н/д (не Linux)"
+  uk: "н/д (не Linux)"
+  es: "n/d (no es Linux)"
+  it: "n/d (non Linux)"
+monitor.key_changed:
+  en: "key"
+  fr: "clé"
+  ru: "ключ"
+  uk: "ключ"
+  es: "clave"
+  it: "chiave"
+monitor.failed:
+  en: "connection"
+  fr: "connexion"
+  ru: "подключение"
+  uk: "підключення"
+  es: "conexión"
+  it: "connessione"
+monitor.timeout:
+  en: "connection timed out"
+  fr: "délai de connexion dépassé"
+  ru: "время подключения истекло"
+  uk: "час підключення вичерпано"
+  es: "tiempo de conexión agotado"
+  it: "tempo di connessione scaduto"
+monitor.gb:
+  en: "GB"
+  fr: "Go"
+  ru: "ГБ"
+  uk: "ГБ"
+  es: "GB"
+  it: "GB"
+monitor.decimal_sep:
+  en: "."
+  fr: ","
+  ru: ","
+  uk: ","
+  es: ","
+  it: ","

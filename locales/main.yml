@@ -1,0 +1,73 @@
+_version: 2
+# Main loop messages (shown in the status bar after an action, or in the terminal).
+
+main.error:
+  en: "Error"
+  fr: "Erreur"
+  ru: "Ошибка"
+  uk: "Помилка"
+  es: "Error"
+  it: "Errore"
+main.files_closed:
+  en: "File manager '%{name}' closed."
+  fr: "Gestionnaire de fichiers '%{name}' fermé."
+  ru: "Файловый менеджер '%{name}' закрыт."
+  uk: "Файловий менеджер '%{name}' закрито."
+  es: "Gestor de archivos '%{name}' cerrado."
+  it: "File manager '%{name}' chiuso."
+main.sftp_failed:
+  en: "SFTP '%{name}' failed: %{error}"
+  fr: "SFTP '%{name}' échoué : %{error}"
+  ru: "Ошибка SFTP '%{name}': %{error}"
+  uk: "Помилка SFTP '%{name}': %{error}"
+  es: "SFTP '%{name}' falló: %{error}"
+  it: "SFTP '%{name}' non riuscito: %{error}"
+main.test_ok:
+  en: "%{name} (%{endpoint}) reachable in %{ms} ms."
+  fr: "%{name} (%{endpoint}) joignable en %{ms} ms."
+  ru: "%{name} (%{endpoint}) доступен за %{ms} мс."
+  uk: "%{name} (%{endpoint}) доступний за %{ms} мс."
+  es: "%{name} (%{endpoint}) accesible en %{ms} ms."
+  it: "%{name} (%{endpoint}) raggiungibile in %{ms} ms."
+main.test_failed:
+  en: "Test failed for '%{name}': %{error}"
+  fr: "Test échoué pour '%{name}' : %{error}"
+  ru: "Проверка '%{name}' не пройдена: %{error}"
+  uk: "Перевірка '%{name}' не пройдена: %{error}"
+  es: "La prueba de '%{name}' falló: %{error}"
+  it: "Test non riuscito per '%{name}': %{error}"
+main.disconnected:
+  en: "Disconnected from %{name} (exit code: %{code})."
+  fr: "Déconnecté de %{name} (code de sortie : %{code})."
+  ru: "Отключено от %{name} (код выхода: %{code})."
+  uk: "Відключено від %{name} (код виходу: %{code})."
+  es: "Desconectado de %{name} (código de salida: %{code})."
+  it: "Disconnesso da %{name} (codice di uscita: %{code})."
+main.session_ended:
+  en: "Session '%{name}' ended (code %{code})."
+  fr: "Session '%{name}' terminée (code %{code})."
+  ru: "Сеанс '%{name}' завершён (код %{code})."
+  uk: "Сеанс '%{name}' завершено (код %{code})."
+  es: "Sesión '%{name}' terminada (código %{code})."
+  it: "Sessione '%{name}' terminata (codice %{code})."
+main.connect_failed_title:
+  en: "Connection failed"
+  fr: "Échec de connexion"
+  ru: "Ошибка подключения"
+  uk: "Помилка підключення"
+  es: "Fallo de conexión"
+  it: "Connessione non riuscita"
+main.connect_failed:
+  en: "Connection to '%{name}' failed: %{error}"
+  fr: "Connexion à '%{name}' échouée : %{error}"
+  ru: "Не удалось подключиться к '%{name}': %{error}"
+  uk: "Не вдалося підключитися до '%{name}': %{error}"
+  es: "La conexión a '%{name}' falló: %{error}"
+  it: "Connessione a '%{name}' non riuscita: %{error}"
+main.press_enter:
+  en: "Press Enter to go back to the ssha menu, or 'q' to quit..."
+  fr: "Appuie sur Entrée pour revenir au menu ssha, ou 'q' pour quitter..."
+  ru: "Нажмите Enter, чтобы вернуться в меню ssha, или 'q' для выхода..."
+  uk: "Натисніть Enter, щоб повернутися до меню ssha, або 'q' для виходу..."
+  es: "Pulsa Intro para volver al menú de ssha, o 'q' para salir..."
+  it: "Premi Invio per tornare al menu di ssha, o 'q' per uscire..."

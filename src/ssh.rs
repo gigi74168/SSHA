@@ -21,7 +21,7 @@ struct RawModeGuard;
 
 impl RawModeGuard {
     fn enter() -> Result<Self> {
-        terminal::enable_raw_mode().context("Impossible d'activer le mode terminal brut")?;
+        terminal::enable_raw_mode().context(t!("ssh.err.raw_mode").into_owned())?;
         Ok(Self)
     }
 }
@@ -42,6 +42,9 @@ enum TerminalInput {
 pub(crate) struct SshClientHandler {
     host_id: String,
     storage: Arc<Storage>,
+    /// Background (quiet) mode: never print nor prompt. A changed host key is refused
+    /// and reported through this flag instead of asking the user.
+    quiet_key_changed: Option<Arc<AtomicBool>>,
 }
 
 impl client::Handler for SshClientHandler {
@@ -62,25 +65,43 @@ impl client::Handler for SshClientHandler {
                 return Ok(true);
             }
 
+            // Background monitoring must never prompt: refuse and report.
+            if let Some(flag) = &self.quiet_key_changed {
+                flag.store(true, Ordering::SeqCst);
+                return Ok(false);
+            }
+
             // Host key changed — warn loudly and ask confirmation before proceeding.
+            let label_old = t!("ssh.key.old");
+            let label_new = t!("ssh.key.new");
+            let label_host = t!("ssh.key.host");
+            let width = [&label_old, &label_new, &label_host]
+                .iter()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0);
+            let pad = |l: &str| format!("{l}{}", " ".repeat(width - l.chars().count()));
             eprintln!();
             eprintln!("\x1b[1;31m══════════════════════════════════════════════════════════════════\x1b[0m");
-            eprintln!("\x1b[1;31m  ATTENTION : L'EMPREINTE SSH DU SERVEUR A CHANGÉ !\x1b[0m");
+            eprintln!("\x1b[1;31m  {}\x1b[0m", t!("ssh.key.changed_title"));
             eprintln!("\x1b[1;31m══════════════════════════════════════════════════════════════════\x1b[0m");
-            eprintln!("  Hôte             : {}", self.host_id);
-            eprintln!("  Ancienne clé     : {} ({})", existing.fingerprint, existing.algorithm);
-            eprintln!("  Nouvelle clé     : {} ({})", fingerprint, algorithm);
-            eprintln!("  Cela peut arriver après une réinstallation du serveur, ou indiquer");
-            eprintln!("  une interception réseau (MITM).");
-            eprint!("  Accepter et mettre à jour l'empreinte ? [o/N] : ");
+            eprintln!("  {} : {}", pad(&label_host), self.host_id);
+            eprintln!(
+                "  {} : {} ({})",
+                pad(&label_old),
+                existing.fingerprint,
+                existing.algorithm
+            );
+            eprintln!("  {} : {} ({})", pad(&label_new), fingerprint, algorithm);
+            eprintln!("  {}", t!("ssh.key.changed_explain"));
+            eprint!("  {} ", t!("ssh.key.accept_prompt"));
             let _ = io::stderr().flush();
 
             let mut answer = String::new();
             if io::stdin().read_line(&mut answer).is_err() {
                 return Ok(false);
             }
-            let normalized = answer.trim().to_lowercase();
-            if matches!(normalized.as_str(), "o" | "oui" | "y" | "yes") {
+            if crate::i18n::is_yes(&answer) {
                 known.insert(
                     self.host_id.clone(),
                     KnownHostEntry {
@@ -96,10 +117,17 @@ impl client::Handler for SshClientHandler {
         }
 
         // Trust On First Use (TOFU)
-        eprintln!(
-            "\x1b[2m[ssha] Nouvelle empreinte enregistrée pour {} ({}, {})\x1b[0m",
-            self.host_id, algorithm, fingerprint
-        );
+        if self.quiet_key_changed.is_none() {
+            eprintln!(
+                "\x1b[2m[ssha] {}\x1b[0m",
+                t!(
+                    "ssh.key.tofu",
+                    host = self.host_id,
+                    algorithm = algorithm,
+                    fingerprint = fingerprint
+                )
+            );
+        }
         known.insert(
             self.host_id.clone(),
             KnownHostEntry {
@@ -139,8 +167,17 @@ pub async fn test_tcp_connection(host: &str, port: u16) -> Result<Duration> {
     let start = Instant::now();
     tokio::time::timeout(TEST_TIMEOUT, TcpStream::connect((host, port)))
         .await
-        .map_err(|_| anyhow!("Délai dépassé ({} s) vers {}:{}", TEST_TIMEOUT.as_secs(), host, port))?
-        .with_context(|| format!("Impossible de joindre {}:{}", host, port))?;
+        .map_err(|_| {
+            anyhow!(t!(
+                "ssh.err.timeout",
+                secs = TEST_TIMEOUT.as_secs(),
+                endpoint = format!("{host}:{port}")
+            )
+            .into_owned())
+        })?
+        .with_context(|| {
+            t!("ssh.err.unreachable", endpoint = format!("{host}:{port}")).into_owned()
+        })?;
     Ok(start.elapsed())
 }
 
@@ -150,17 +187,46 @@ pub(crate) async fn connect_and_authenticate(
     host: &SshHost,
     storage: Arc<Storage>,
 ) -> Result<client::Handle<SshClientHandler>> {
-    connect_with_depth(host, storage, 0).await
+    connect_with_depth(host, storage, 0, None).await
+}
+
+/// Error returned by [`connect_quiet`]: the server host key changed (connection refused).
+#[derive(Debug)]
+pub struct HostKeyChanged;
+
+impl std::fmt::Display for HostKeyChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", t!("ssh.key.changed_short"))
+    }
+}
+
+impl std::error::Error for HostKeyChanged {}
+
+/// Opens an authenticated session for background work (CPU/RAM monitoring): nothing is ever
+/// printed or asked. A changed host key makes it fail with [`HostKeyChanged`].
+pub(crate) async fn connect_quiet(
+    host: &SshHost,
+    storage: Arc<Storage>,
+) -> Result<client::Handle<SshClientHandler>> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let result = connect_with_depth(host, storage, 0, Some(Arc::clone(&flag))).await;
+    match result {
+        Err(_) if flag.load(Ordering::SeqCst) => Err(HostKeyChanged.into()),
+        other => other,
+    }
 }
 
 fn connect_with_depth<'a>(
     host: &'a SshHost,
     storage: Arc<Storage>,
     depth: u8,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<client::Handle<SshClientHandler>>> + 'a>> {
+    quiet: Option<Arc<AtomicBool>>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<client::Handle<SshClientHandler>>> + Send + 'a>,
+> {
     Box::pin(async move {
         if depth > 4 {
-            bail!("Boucle détectée dans ProxyJump (profondeur maximale dépassée).");
+            bail!(t!("ssh.err.proxy_loop").into_owned());
         }
 
         let config = Arc::new(client::Config {
@@ -174,29 +240,34 @@ fn connect_with_depth<'a>(
         let handler = SshClientHandler {
             host_id: host.host_key_id(),
             storage: Arc::clone(&storage),
+            quiet_key_changed: quiet.clone(),
         };
 
         let mut session = if let Some(ref jump_spec) = host.proxy_jump {
             let jump_host = resolve_jump_host(jump_spec, &storage, &host.username)?;
-            eprintln!(
-                "\x1b[2m[ssha] Rebond ProxyJump via {} ({})...\x1b[0m",
-                jump_host.name,
-                jump_host.endpoint_display()
-            );
-            let jump_session = connect_with_depth(&jump_host, Arc::clone(&storage), depth + 1).await?;
+            if quiet.is_none() {
+                eprintln!(
+                    "\x1b[2m[ssha] {}\x1b[0m",
+                    t!(
+                        "ssh.proxy_jump_via",
+                        name = jump_host.name,
+                        endpoint = jump_host.endpoint_display()
+                    )
+                );
+            }
+            let jump_session =
+                connect_with_depth(&jump_host, Arc::clone(&storage), depth + 1, quiet.clone())
+                    .await?;
             let tunnel = jump_session
-                .channel_open_direct_tcpip(
-                    host.host.as_str(),
-                    host.port as u32,
-                    "127.0.0.1",
-                    0,
-                )
+                .channel_open_direct_tcpip(host.host.as_str(), host.port as u32, "127.0.0.1", 0)
                 .await
                 .with_context(|| {
-                    format!(
-                        "Impossible d'ouvrir le tunnel ProxyJump vers {}:{} via {}",
-                        host.host, host.port, jump_host.name
+                    t!(
+                        "ssh.err.proxy_tunnel",
+                        endpoint = format!("{}:{}", host.host, host.port),
+                        jump = jump_host.name
                     )
+                    .into_owned()
                 })?;
 
             tokio::time::timeout(
@@ -205,18 +276,19 @@ fn connect_with_depth<'a>(
             )
             .await
             .map_err(|_| {
-                anyhow!(
-                    "Délai de connexion dépassé ({} s) vers {}:{} via ProxyJump.",
-                    CONNECT_TIMEOUT.as_secs(),
-                    host.host,
-                    host.port
+                anyhow!(t!(
+                    "ssh.err.proxy_timeout",
+                    secs = CONNECT_TIMEOUT.as_secs(),
+                    endpoint = format!("{}:{}", host.host, host.port)
                 )
+                .into_owned())
             })?
             .with_context(|| {
-                format!(
-                    "Impossible d'établir la session SSH vers {}:{} via ProxyJump",
-                    host.host, host.port
+                t!(
+                    "ssh.err.proxy_session",
+                    endpoint = format!("{}:{}", host.host, host.port)
                 )
+                .into_owned()
             })?
         } else {
             tokio::time::timeout(
@@ -225,18 +297,19 @@ fn connect_with_depth<'a>(
             )
             .await
             .map_err(|_| {
-                anyhow!(
-                    "Délai de connexion dépassé ({} s) vers {}:{}.",
-                    CONNECT_TIMEOUT.as_secs(),
-                    host.host,
-                    host.port
+                anyhow!(t!(
+                    "ssh.err.connect_timeout",
+                    secs = CONNECT_TIMEOUT.as_secs(),
+                    endpoint = format!("{}:{}", host.host, host.port)
                 )
+                .into_owned())
             })?
             .with_context(|| {
-                format!(
-                    "Impossible de se connecter à {}:{}",
-                    host.host, host.port
+                t!(
+                    "ssh.err.connect",
+                    endpoint = format!("{}:{}", host.host, host.port)
                 )
+                .into_owned()
             })?
         };
 
@@ -262,7 +335,7 @@ fn resolve_jump_host(spec: &str, storage: &Storage, default_user: &str) -> Resul
         Some((h, p)) => (
             h.trim_matches(['[', ']']).to_string(),
             p.parse::<u16>()
-                .with_context(|| format!("Port invalide dans ProxyJump '{}'", spec))?,
+                .with_context(|| t!("ssh.err.proxy_port", spec = spec).into_owned())?,
         ),
         None => (host_port.to_string(), 22),
     };
@@ -282,6 +355,7 @@ fn resolve_jump_host(spec: &str, storage: &Storage, default_user: &str) -> Resul
         local_forwards: Vec::new(),
         extra_keys: vec!["~/.ssh/id_rsa".to_string()],
         forward_agent: false,
+        monitor: false,
         created_at: Utc::now(),
         last_used: None,
     })
@@ -297,12 +371,12 @@ pub(crate) async fn exec_remote_command(
     let mut channel = session
         .channel_open_session()
         .await
-        .context("Impossible d'ouvrir un canal SSH pour exécuter la commande distante")?;
+        .context(t!("ssh.err.exec_channel").into_owned())?;
 
     channel
         .exec(true, command)
         .await
-        .context("Impossible de lancer la commande distante")?;
+        .context(t!("ssh.err.exec").into_owned())?;
 
     if let Some(data) = stdin_data {
         if !data.is_empty() {
@@ -324,16 +398,22 @@ pub(crate) async fn exec_remote_command(
         }
     }
 
-    Ok((exit_code, String::from_utf8_lossy(&output).trim().to_string()))
+    Ok((
+        exit_code,
+        String::from_utf8_lossy(&output).trim().to_string(),
+    ))
 }
 
 /// Establishes an interactive SSH terminal session with automatic authentication,
 /// optional ProxyJump bastion, and active LocalForward TCP tunnels.
 pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Result<u32> {
     eprintln!(
-        "\x1b[1;36m[ssha]\x1b[0m Connexion à \x1b[1m{}\x1b[0m ({})...",
-        host.name,
-        host.endpoint_display()
+        "\x1b[1;36m[ssha]\x1b[0m {}",
+        t!(
+            "ssh.connecting",
+            name = format!("\x1b[1m{}\x1b[0m", host.name),
+            endpoint = host.endpoint_display()
+        )
     );
 
     let session = Arc::new(connect_and_authenticate(host, storage).await?);
@@ -344,7 +424,10 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
         let bind_target = format!("{}:{}", spec.bind_addr, spec.local_port);
         match tokio::net::TcpListener::bind(&bind_target).await {
             Ok(listener) => {
-                eprintln!("\x1b[2m[ssha] Tunnel local actif : {spec}\x1b[0m");
+                eprintln!(
+                    "\x1b[2m[ssha] {}\x1b[0m",
+                    t!("ssh.tunnel_active", spec = spec)
+                );
                 let sess = Arc::clone(&session);
                 let remote_host = spec.remote_host.clone();
                 let remote_port = spec.remote_port as u32;
@@ -363,7 +446,11 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
                                 .await
                             {
                                 let mut ssh_stream = channel.into_stream();
-                                let _ = tokio::io::copy_bidirectional(&mut local_stream, &mut ssh_stream).await;
+                                let _ = tokio::io::copy_bidirectional(
+                                    &mut local_stream,
+                                    &mut ssh_stream,
+                                )
+                                .await;
                             }
                         });
                     }
@@ -371,7 +458,8 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
             }
             Err(e) => {
                 eprintln!(
-                    "\x1b[1;33m[ssha]\x1b[0m Impossible d'ouvrir le tunnel local {spec} : {e}"
+                    "\x1b[1;33m[ssha]\x1b[0m {}",
+                    t!("ssh.err.tunnel", spec = spec, error = e)
                 );
             }
         }
@@ -380,7 +468,7 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
     let mut channel = session
         .channel_open_session()
         .await
-        .context("Impossible d'ouvrir une session SSH")?;
+        .context(t!("ssh.err.session").into_owned())?;
 
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     let term = env::var("TERM")
@@ -391,12 +479,12 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
     channel
         .request_pty(true, &term, cols as u32, rows as u32, 0, 0, &[])
         .await
-        .context("Impossible d'allouer un PTY distant")?;
+        .context(t!("ssh.err.pty").into_owned())?;
 
     channel
         .request_shell(true)
         .await
-        .context("Impossible de démarrer le shell distant")?;
+        .context(t!("ssh.err.shell").into_owned())?;
 
     let exit_code = run_interactive_loop(&mut channel).await?;
 
@@ -405,7 +493,7 @@ pub async fn connect_interactive(host: &SshHost, storage: Arc<Storage>) -> Resul
     }
 
     let _ = session
-        .disconnect(Disconnect::ByApplication, "", "fr")
+        .disconnect(Disconnect::ByApplication, "", "en")
         .await;
 
     Ok(exit_code)
@@ -420,7 +508,7 @@ async fn authenticate(
             let res = session
                 .authenticate_password(&host.username, password)
                 .await
-                .context("Erreur pendant l'authentification par mot de passe")?;
+                .context(t!("ssh.err.auth_password").into_owned())?;
 
             if res.success() {
                 return Ok(());
@@ -430,23 +518,23 @@ async fn authenticate(
             let mut kbd = session
                 .authenticate_keyboard_interactive_start(&host.username, None)
                 .await
-                .context("Erreur pendant l'authentification keyboard-interactive")?;
+                .context(t!("ssh.err.auth_kbd").into_owned())?;
 
             let mut attempts = 0;
             loop {
                 match kbd {
                     KeyboardInteractiveAuthResponse::Success => return Ok(()),
                     KeyboardInteractiveAuthResponse::Failure { .. } => {
-                        bail!(
-                            "Authentification refusée pour {}@{} (vérifie l'utilisateur et le mot de passe).",
-                            host.username,
-                            host.host
-                        );
+                        bail!(t!(
+                            "ssh.err.auth_refused",
+                            target = format!("{}@{}", host.username, host.host)
+                        )
+                        .into_owned());
                     }
                     KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
                         attempts += 1;
                         if attempts > 5 {
-                            bail!("Trop de demandes d'authentification interactive.");
+                            bail!(t!("ssh.err.auth_too_many").into_owned());
                         }
                         let responses = prompts
                             .iter()
@@ -461,7 +549,7 @@ async fn authenticate(
                         kbd = session
                             .authenticate_keyboard_interactive_respond(responses)
                             .await
-                            .context("Erreur lors de la réponse keyboard-interactive")?;
+                            .context(t!("ssh.err.auth_kbd_reply").into_owned())?;
                     }
                 }
             }
@@ -486,10 +574,12 @@ async fn authenticate(
                 let key_pair = match load_secret_key(&expanded, key_pass) {
                     Ok(k) => k,
                     Err(e) => {
-                        last_err = Some(anyhow!(
-                            "Impossible de charger la clé privée SSH '{}' ({e}).",
-                            expanded.display()
-                        ));
+                        last_err = Some(anyhow!(t!(
+                            "ssh.err.key_load",
+                            path = expanded.display(),
+                            error = e
+                        )
+                        .into_owned()));
                         continue;
                     }
                 };
@@ -503,25 +593,25 @@ async fn authenticate(
                 {
                     Ok(auth_res) if auth_res.success() => return Ok(()),
                     Ok(_) => {
-                        last_err = Some(anyhow!(
-                            "Clé SSH '{}' refusée pour {}@{}.",
-                            expanded.display(),
-                            host.username,
-                            host.host
-                        ));
+                        last_err = Some(anyhow!(t!(
+                            "ssh.err.key_refused",
+                            path = expanded.display(),
+                            target = format!("{}@{}", host.username, host.host)
+                        )
+                        .into_owned()));
                     }
                     Err(e) => {
-                        last_err = Some(anyhow!("Erreur d'authentification par clé SSH : {e}"));
+                        last_err = Some(anyhow!(t!("ssh.err.key_auth", error = e).into_owned()));
                     }
                 }
             }
 
             Err(last_err.unwrap_or_else(|| {
-                anyhow!(
-                    "Authentification par clé SSH refusée pour {}@{}.",
-                    host.username,
-                    host.host
+                anyhow!(t!(
+                    "ssh.err.key_auth_refused",
+                    target = format!("{}@{}", host.username, host.host)
                 )
+                .into_owned())
             }))
         }
     }
@@ -535,8 +625,8 @@ async fn run_interactive_loop(channel: &mut russh::Channel<client::Msg>) -> Resu
     let reader_handle = spawn_input_reader(tx, Arc::clone(&stop));
 
     #[cfg(unix)]
-    let mut sigwinch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
-        .ok();
+    let mut sigwinch =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
 
     let mut stdout = io::stdout();
     let mut exit_code: u32 = 0;
@@ -676,7 +766,10 @@ fn spawn_input_reader(
                         break;
                     }
                     Ok(n) => {
-                        if tx.blocking_send(TerminalInput::Data(buf[..n].to_vec())).is_err() {
+                        if tx
+                            .blocking_send(TerminalInput::Data(buf[..n].to_vec()))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -922,7 +1015,7 @@ mod tests {
 
         let mut srv = TestSshServer {
             expected_user: "alex".into(),
-            expected_pass: "mon-mdp-secret".into(),
+            expected_pass: "my-secret-password".into(),
         };
 
         let server_task = tokio::spawn(async move {
@@ -940,7 +1033,7 @@ mod tests {
             port,
             username: "alex".into(),
             auth: AuthMethod::Password {
-                password: "mon-mdp-secret".into(),
+                password: "my-secret-password".into(),
             },
             group: None,
             note: None,
@@ -948,6 +1041,7 @@ mod tests {
             local_forwards: Vec::new(),
             extra_keys: Vec::new(),
             forward_agent: false,
+            monitor: false,
             created_at: Utc::now(),
             last_used: None,
         };
@@ -956,13 +1050,14 @@ mod tests {
         let handler = SshClientHandler {
             host_id: host.host_key_id(),
             storage: Arc::clone(&storage),
+            quiet_key_changed: None,
         };
         let mut session = client::connect(client_cfg, ("127.0.0.1", port), handler)
             .await
             .unwrap();
         authenticate(&mut session, &host).await.unwrap();
         let _ = session
-            .disconnect(Disconnect::ByApplication, "", "fr")
+            .disconnect(Disconnect::ByApplication, "", "en")
             .await;
 
         // Verify TOFU fingerprint was persisted
@@ -972,7 +1067,7 @@ mod tests {
         // 3. Wrong password must fail cleanly
         let bad_host = SshHost {
             auth: AuthMethod::Password {
-                password: "mauvais-mdp".into(),
+                password: "wrong-password".into(),
             },
             ..host
         };
@@ -980,11 +1075,36 @@ mod tests {
         let handler2 = SshClientHandler {
             host_id: bad_host.host_key_id(),
             storage: Arc::clone(&storage),
+            quiet_key_changed: None,
         };
         let mut session2 = client::connect(client_cfg2, ("127.0.0.1", port), handler2)
             .await
             .unwrap();
         assert!(authenticate(&mut session2, &bad_host).await.is_err());
+
+        // 4. Background (quiet) connection with the saved password works silently
+        let good_host = SshHost {
+            auth: AuthMethod::Password {
+                password: "my-secret-password".into(),
+            },
+            ..bad_host
+        };
+        let quiet = connect_quiet(&good_host, Arc::clone(&storage))
+            .await
+            .unwrap();
+        let _ = quiet.disconnect(Disconnect::ByApplication, "", "en").await;
+
+        // 5. A changed host key is refused without any prompt and reported as HostKeyChanged
+        let mut known = storage.load_known_hosts().unwrap();
+        if let Some(entry) = known.get_mut(&good_host.host_key_id()) {
+            entry.fingerprint = "SHA256:not-the-real-key".into();
+        }
+        storage.save_known_hosts(&known).unwrap();
+        let err = match connect_quiet(&good_host, Arc::clone(&storage)).await {
+            Ok(_) => panic!("a changed host key must be refused"),
+            Err(e) => e,
+        };
+        assert!(err.downcast_ref::<HostKeyChanged>().is_some());
 
         server_task.abort();
     }

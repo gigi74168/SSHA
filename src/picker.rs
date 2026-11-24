@@ -53,7 +53,11 @@ pub fn pick_folder(title: &str) -> PickerResult {
 }
 
 /// Opens a native OS "Save File" dialog to choose an export destination.
-pub fn pick_save_file(title: &str, default_name: &str, filter: Option<(&str, &str)>) -> PickerResult {
+pub fn pick_save_file(
+    title: &str,
+    default_name: &str,
+    filter: Option<(&str, &str)>,
+) -> PickerResult {
     #[cfg(windows)]
     {
         windows_pick_save_file(title, default_name, filter)
@@ -83,13 +87,7 @@ fn run_powershell_dialog(script: &str) -> PickerResult {
     use std::process::Command;
 
     let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-STA",
-            "-Command",
-            script,
-        ])
+        .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", script])
         .output();
 
     let Ok(out) = output else {
@@ -110,8 +108,8 @@ fn run_powershell_dialog(script: &str) -> PickerResult {
 #[cfg(windows)]
 fn windows_pick_file(title: &str, filter: Option<(&str, &str)>) -> PickerResult {
     let filter_str = match filter {
-        Some((label, pattern)) => format!("{label}|{pattern}|Tous les fichiers (*.*)|*.*"),
-        None => "Tous les fichiers (*.*)|*.*".to_string(),
+        Some((label, pattern)) => format!("{label}|{pattern}|{} (*.*)|*.*", t!("picker.all_files")),
+        None => format!("{} (*.*)|*.*", t!("picker.all_files")),
     };
     let script = format!(
         r#"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -161,8 +159,8 @@ fn windows_pick_save_file(
     filter: Option<(&str, &str)>,
 ) -> PickerResult {
     let filter_str = match filter {
-        Some((label, pattern)) => format!("{label}|{pattern}|Tous les fichiers (*.*)|*.*"),
-        None => "Tous les fichiers (*.*)|*.*".to_string(),
+        Some((label, pattern)) => format!("{label}|{pattern}|{} (*.*)|*.*", t!("picker.all_files")),
+        None => format!("{} (*.*)|*.*", t!("picker.all_files")),
     };
     let script = format!(
         r#"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -278,13 +276,10 @@ fn unix_pick_file(title: &str, filter: Option<(&str, &str)>) -> PickerResult {
         return PickerResult::Unavailable;
     }
 
-    let mut zenity_args = vec![
-        "--file-selection".to_string(),
-        format!("--title={title}"),
-    ];
+    let mut zenity_args = vec!["--file-selection".to_string(), format!("--title={title}")];
     if let Some((label, pattern)) = filter {
         zenity_args.push(format!("--file-filter={label} | {pattern}"));
-        zenity_args.push("--file-filter=Tous les fichiers | *".to_string());
+        zenity_args.push(format!("--file-filter={} | *", t!("picker.all_files")));
     }
     if let Some(res) = run_unix_cmd("zenity", &zenity_args) {
         return res;
@@ -292,7 +287,7 @@ fn unix_pick_file(title: &str, filter: Option<(&str, &str)>) -> PickerResult {
 
     let kdialog_filter = filter
         .map(|(label, pattern)| format!("{pattern}|{label}"))
-        .unwrap_or_else(|| "*|Tous les fichiers".to_string());
+        .unwrap_or_else(|| format!("*|{}", t!("picker.all_files")));
     let kdialog_args = vec![
         "--getopenfilename".to_string(),
         ".".to_string(),

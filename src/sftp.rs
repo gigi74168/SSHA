@@ -99,28 +99,33 @@ impl SftpClient {
             Ok(sftp) => Ok(Self { session, sftp }),
             Err(first_err) => {
                 eprintln!(
-                    "\x1b[1;33m[ssha]\x1b[0m SFTP n'est pas actif sur \x1b[1m{}\x1b[0m ({}).",
-                    host.name, first_err
+                    "\x1b[1;33m[ssha]\x1b[0m {}",
+                    t!(
+                        "sftp.not_active",
+                        name = format!("\x1b[1m{}\x1b[0m", host.name),
+                        error = first_err
+                    )
                 );
-                eprintln!(
-                    "\x1b[1;36m[ssha]\x1b[0m Vérification et installation automatique de SFTP sur la machine distante..."
-                );
+                eprintln!("\x1b[1;36m[ssha]\x1b[0m {}", t!("sftp.installing"));
 
                 ensure_remote_sftp_installed(&session, host).await?;
                 let _ = session
-                    .disconnect(Disconnect::ByApplication, "", "fr")
+                    .disconnect(Disconnect::ByApplication, "", "en")
                     .await;
 
                 // Reconnect so the reloaded sshd picks up the new SFTP subsystem
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 let fresh_session = connect_and_authenticate(host, storage).await?;
-                let sftp = try_open_sftp_subsystem(&fresh_session).await.with_context(|| {
-                    "SFTP a été installé/configuré mais le sous-système reste indisponible sur la machine distante"
-                })?;
+                let sftp = try_open_sftp_subsystem(&fresh_session)
+                    .await
+                    .with_context(|| t!("sftp.err.still_unavailable").into_owned())?;
 
                 eprintln!(
-                    "\x1b[1;32m✓\x1b[0m SFTP installé et activé sur \x1b[1m{}\x1b[0m !",
-                    host.name
+                    "\x1b[1;32m✓\x1b[0m {}",
+                    t!(
+                        "sftp.installed",
+                        name = format!("\x1b[1m{}\x1b[0m", host.name)
+                    )
                 );
                 Ok(Self {
                     session: fresh_session,
@@ -134,7 +139,7 @@ impl SftpClient {
         self.sftp
             .canonicalize(path)
             .await
-            .with_context(|| format!("Impossible de résoudre le chemin distant '{}'", path))
+            .with_context(|| t!("sftp.err.resolve", path = path).into_owned())
     }
 
     pub async fn list_dir(&self, path: &str) -> Result<Vec<RemoteEntry>> {
@@ -142,7 +147,7 @@ impl SftpClient {
             .sftp
             .read_dir(path)
             .await
-            .with_context(|| format!("Impossible de lire le dossier distant '{}'", path))?;
+            .with_context(|| t!("sftp.err.read_remote_dir", path = path).into_owned())?;
 
         let mut list = Vec::new();
         for entry in entries {
@@ -191,14 +196,14 @@ impl SftpClient {
         self.sftp
             .create_dir(path)
             .await
-            .with_context(|| format!("Impossible de créer le dossier '{}'", path))
+            .with_context(|| t!("sftp.err.mkdir", path = path).into_owned())
     }
 
     pub async fn rename(&self, old_path: &str, new_path: &str) -> Result<()> {
         self.sftp
             .rename(old_path, new_path)
             .await
-            .with_context(|| format!("Impossible de renommer '{}' en '{}'", old_path, new_path))
+            .with_context(|| t!("sftp.err.rename", from = old_path, to = new_path).into_owned())
     }
 
     pub async fn remove_recursive(&self, path: &str, is_dir: bool) -> Result<()> {
@@ -206,7 +211,7 @@ impl SftpClient {
             self.sftp
                 .remove_file(path)
                 .await
-                .with_context(|| format!("Impossible de supprimer le fichier '{}'", path))?;
+                .with_context(|| t!("sftp.err.delete_file", path = path).into_owned())?;
             return Ok(());
         }
         self.remove_dir_recursive_boxed(path.to_string()).await
@@ -222,25 +227,30 @@ impl SftpClient {
                 if entry.is_dir && !entry.is_symlink {
                     self.remove_dir_recursive_boxed(entry.path).await?;
                 } else {
-                    self.sftp.remove_file(&entry.path).await.with_context(|| {
-                        format!("Impossible de supprimer '{}'", entry.path)
-                    })?;
+                    self.sftp
+                        .remove_file(&entry.path)
+                        .await
+                        .with_context(|| t!("sftp.err.delete", path = entry.path).into_owned())?;
                 }
             }
             self.sftp
                 .remove_dir(&path)
                 .await
-                .with_context(|| format!("Impossible de supprimer le dossier '{}'", path))
+                .with_context(|| t!("sftp.err.delete_dir", path = path).into_owned())
         })
     }
 
     /// Reads up to `max_bytes` from a remote file for inline preview.
-    pub async fn read_preview(&self, remote_path: &str, max_bytes: usize) -> Result<(Vec<u8>, bool)> {
+    pub async fn read_preview(
+        &self,
+        remote_path: &str,
+        max_bytes: usize,
+    ) -> Result<(Vec<u8>, bool)> {
         let mut file = self
             .sftp
             .open(remote_path)
             .await
-            .with_context(|| format!("Impossible d'ouvrir '{}'", remote_path))?;
+            .with_context(|| t!("sftp.err.open", path = remote_path).into_owned())?;
 
         let mut buf = vec![0u8; max_bytes + 1];
         let mut total = 0;
@@ -248,7 +258,7 @@ impl SftpClient {
             let n = file
                 .read(&mut buf[total..])
                 .await
-                .with_context(|| format!("Erreur de lecture de '{}'", remote_path))?;
+                .with_context(|| t!("sftp.err.read_remote", path = remote_path).into_owned())?;
             if n == 0 {
                 break;
             }
@@ -263,10 +273,16 @@ impl SftpClient {
     pub async fn expand_remote_path(&self, path: &str) -> String {
         let trimmed = path.trim();
         if trimmed == "~" {
-            return self.canonicalize(".").await.unwrap_or_else(|_| ".".to_string());
+            return self
+                .canonicalize(".")
+                .await
+                .unwrap_or_else(|_| ".".to_string());
         }
         if let Some(rest) = trimmed.strip_prefix("~/") {
-            let home = self.canonicalize(".").await.unwrap_or_else(|_| ".".to_string());
+            let home = self
+                .canonicalize(".")
+                .await
+                .unwrap_or_else(|_| ".".to_string());
             return join_remote_path(&home, rest);
         }
         trimmed.to_string()
@@ -284,11 +300,10 @@ impl SftpClient {
         F: FnMut(&str, u64, Option<u64>),
     {
         let remote_path = self.expand_remote_path(remote_path).await;
-        let meta = self
-            .sftp
-            .metadata(&remote_path)
-            .await
-            .with_context(|| format!("Chemin distant introuvable : '{}'", remote_path))?;
+        let meta =
+            self.sftp.metadata(&remote_path).await.with_context(|| {
+                t!("sftp.err.remote_not_found", path = remote_path).into_owned()
+            })?;
 
         let remote_name = remote_file_name(&remote_path);
         let target = if local_dest.is_dir() {
@@ -299,16 +314,17 @@ impl SftpClient {
 
         let mut stats = TransferStats::default();
         if meta.file_type().is_dir() {
-            self.download_dir_boxed(
-                remote_path,
-                target.clone(),
+            self.download_dir_boxed(remote_path, target.clone(), &mut stats, &mut on_progress)
+                .await?;
+        } else {
+            self.download_file(
+                &remote_path,
+                &target,
+                meta.size,
                 &mut stats,
                 &mut on_progress,
             )
             .await?;
-        } else {
-            self.download_file(&remote_path, &target, meta.size, &mut stats, &mut on_progress)
-                .await?;
         }
 
         Ok((target, stats))
@@ -328,7 +344,7 @@ impl SftpClient {
         if let Some(parent) = local_path.parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent).await.with_context(|| {
-                    format!("Impossible de créer le dossier local '{}'", parent.display())
+                    t!("sftp.err.mkdir_local", path = parent.display()).into_owned()
                 })?;
             }
         }
@@ -337,13 +353,10 @@ impl SftpClient {
             .sftp
             .open(remote_path)
             .await
-            .with_context(|| format!("Impossible d'ouvrir le fichier distant '{}'", remote_path))?;
+            .with_context(|| t!("sftp.err.open_remote", path = remote_path).into_owned())?;
 
         let mut local_file = tokio::fs::File::create(local_path).await.with_context(|| {
-            format!(
-                "Impossible de créer le fichier local '{}'",
-                local_path.display()
-            )
+            t!("sftp.err.create_local", path = local_path.display()).into_owned()
         })?;
 
         let name = remote_file_name(remote_path);
@@ -354,14 +367,13 @@ impl SftpClient {
             let n = remote_file
                 .read(&mut buf)
                 .await
-                .with_context(|| format!("Erreur de lecture distante '{}'", remote_path))?;
+                .with_context(|| t!("sftp.err.read_remote", path = remote_path).into_owned())?;
             if n == 0 {
                 break;
             }
-            local_file
-                .write_all(&buf[..n])
-                .await
-                .with_context(|| format!("Erreur d'écriture locale '{}'", local_path.display()))?;
+            local_file.write_all(&buf[..n]).await.with_context(|| {
+                t!("sftp.err.write_local", path = local_path.display()).into_owned()
+            })?;
             transferred += n as u64;
             on_progress(&name, transferred, total_size);
         }
@@ -383,12 +395,11 @@ impl SftpClient {
         F: FnMut(&str, u64, Option<u64>) + 'a,
     {
         Box::pin(async move {
-            tokio::fs::create_dir_all(&local_dir).await.with_context(|| {
-                format!(
-                    "Impossible de créer le dossier local '{}'",
-                    local_dir.display()
-                )
-            })?;
+            tokio::fs::create_dir_all(&local_dir)
+                .await
+                .with_context(|| {
+                    t!("sftp.err.mkdir_local", path = local_dir.display()).into_owned()
+                })?;
 
             let entries = self.list_dir(&remote_dir).await?;
             for entry in entries {
@@ -422,7 +433,7 @@ impl SftpClient {
         F: FnMut(&str, u64, Option<u64>),
     {
         if !local_source.exists() {
-            bail!("Fichier ou dossier local introuvable : '{}'", local_source.display());
+            bail!(t!("cli.sftp.local_not_found", path = local_source.display()).into_owned());
         }
 
         let canonical_local = std::fs::canonicalize(local_source).ok();
@@ -430,7 +441,9 @@ impl SftpClient {
             .file_name()
             .or_else(|| canonical_local.as_deref().and_then(|p| p.file_name()))
             .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("Nom de fichier local invalide : '{}'", local_source.display()))?
+            .ok_or_else(|| {
+                anyhow!(t!("sftp.err.local_name", path = local_source.display()).into_owned())
+            })?
             .to_string();
 
         let remote_dest = self.expand_remote_path(remote_dest).await;
@@ -479,14 +492,14 @@ impl SftpClient {
     where
         F: FnMut(&str, u64, Option<u64>),
     {
-        let meta = tokio::fs::metadata(local_path).await.with_context(|| {
-            format!("Impossible de lire les métadonnées de '{}'", local_path.display())
-        })?;
+        let meta = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| t!("sftp.err.metadata", path = local_path.display()).into_owned())?;
         let total_size = Some(meta.len());
 
-        let mut local_file = tokio::fs::File::open(local_path).await.with_context(|| {
-            format!("Impossible d'ouvrir le fichier local '{}'", local_path.display())
-        })?;
+        let mut local_file = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| t!("sftp.err.open_local", path = local_path.display()).into_owned())?;
 
         let mut remote_file = self
             .sftp
@@ -495,28 +508,27 @@ impl SftpClient {
                 OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
             )
             .await
-            .with_context(|| format!("Impossible de créer le fichier distant '{}'", remote_path))?;
+            .with_context(|| t!("sftp.err.create_remote", path = remote_path).into_owned())?;
 
         let name = local_path
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("fichier")
+            .unwrap_or("file")
             .to_string();
         let mut buf = vec![0u8; CHUNK_SIZE];
         let mut transferred: u64 = 0;
 
         loop {
-            let n = local_file
-                .read(&mut buf)
-                .await
-                .with_context(|| format!("Erreur de lecture locale '{}'", local_path.display()))?;
+            let n = local_file.read(&mut buf).await.with_context(|| {
+                t!("sftp.err.read_local", path = local_path.display()).into_owned()
+            })?;
             if n == 0 {
                 break;
             }
             remote_file
                 .write_all(&buf[..n])
                 .await
-                .with_context(|| format!("Erreur d'écriture distante '{}'", remote_path))?;
+                .with_context(|| t!("sftp.err.write_remote", path = remote_path).into_owned())?;
             transferred += n as u64;
             on_progress(&name, transferred, total_size);
         }
@@ -540,13 +552,14 @@ impl SftpClient {
     {
         Box::pin(async move {
             if !self.sftp.try_exists(&remote_dir).await.unwrap_or(false) {
-                self.sftp.create_dir(&remote_dir).await.with_context(|| {
-                    format!("Impossible de créer le dossier distant '{}'", remote_dir)
-                })?;
+                self.sftp
+                    .create_dir(&remote_dir)
+                    .await
+                    .with_context(|| t!("sftp.err.mkdir_remote", path = remote_dir).into_owned())?;
             }
 
             let mut reader = tokio::fs::read_dir(&local_dir).await.with_context(|| {
-                format!("Impossible de lire le dossier local '{}'", local_dir.display())
+                t!("sftp.err.read_local_dir", path = local_dir.display()).into_owned()
             })?;
 
             while let Some(entry) = reader.next_entry().await? {
@@ -582,14 +595,14 @@ async fn try_open_sftp_subsystem(
     let channel = session
         .channel_open_session()
         .await
-        .context("Impossible d'ouvrir un canal SSH pour SFTP")?;
+        .context(t!("sftp.err.channel").into_owned())?;
     channel
         .request_subsystem(true, "sftp")
         .await
-        .context("Le sous-système SFTP a été refusé par le serveur")?;
+        .context(t!("sftp.err.subsystem_refused").into_owned())?;
     let sftp = SftpSession::new(channel.into_stream())
         .await
-        .context("Impossible d'initialiser la session SFTP")?;
+        .context(t!("sftp.err.init").into_owned())?;
     Ok(sftp)
 }
 
@@ -600,10 +613,12 @@ async fn ensure_remote_sftp_installed(
     // Check that the remote host is a POSIX/Linux system
     let (uname_code, uname_out) = exec_remote_command(session, "uname -s", None).await?;
     if uname_code != 0 || !uname_out.to_lowercase().contains("linux") {
-        bail!(
-            "Installation automatique de SFTP uniquement supportée sur Linux (système détecté : '{}').",
-            if uname_out.is_empty() { "inconnu" } else { uname_out.as_str() }
-        );
+        let detected = if uname_out.is_empty() {
+            t!("sftp.unknown_os").into_owned()
+        } else {
+            uname_out.clone()
+        };
+        bail!(t!("sftp.err.linux_only", os = detected).into_owned());
     }
 
     let quoted_script = shell_single_quote(REMOTE_SFTP_INSTALL_SCRIPT);
@@ -625,22 +640,17 @@ async fn ensure_remote_sftp_installed(
             )
             .await?
         } else {
-            bail!(
-                "Droits root ou sudo sans mot de passe requis pour installer SFTP automatiquement sur '{}' (connexion par clé SSH).",
-                host.name
-            );
+            bail!(t!("sftp.err.root_required", name = host.name).into_owned());
         }
     };
 
     if exit_code != 0 {
-        bail!(
-            "Échec de l'installation automatique de SFTP (code {exit_code}) : {}",
-            if output.is_empty() {
-                "aucune sortie".to_string()
-            } else {
-                output
-            }
-        );
+        let output = if output.is_empty() {
+            t!("sftp.no_output").into_owned()
+        } else {
+            output
+        };
+        bail!(t!("sftp.err.install_failed", code = exit_code, output = output).into_owned());
     }
 
     Ok(())
@@ -714,20 +724,29 @@ pub fn resolve_local_path(input: &str) -> PathBuf {
 }
 
 pub fn format_size(bytes: u64) -> String {
+    let units = t!("sftp.size_units");
+    let units: Vec<&str> = units.split(',').map(str::trim).collect();
+    format_size_with(bytes, &units, &t!("monitor.decimal_sep"))
+}
+
+/// `units` = [bytes, KB, MB, GB] symbols of the active language.
+fn format_size_with(bytes: u64, units: &[&str], decimal_sep: &str) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;
+    let unit = |i: usize| units.get(i).copied().unwrap_or(["B", "KB", "MB", "GB"][i]);
 
     let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} Go", b / GB)
+    let (value, idx) = if b >= GB {
+        (b / GB, 3)
     } else if b >= MB {
-        format!("{:.1} Mo", b / MB)
+        (b / MB, 2)
     } else if b >= KB {
-        format!("{:.1} Ko", b / KB)
+        (b / KB, 1)
     } else {
-        format!("{bytes} o")
-    }
+        return format!("{bytes} {}", unit(0));
+    };
+    format!("{:.1} {}", value, unit(idx)).replace('.', decimal_sep)
 }
 
 pub fn format_permissions(perms: Option<u32>, is_dir: bool, is_symlink: bool) -> String {
@@ -767,7 +786,7 @@ pub fn format_mtime(mtime: Option<u32>) -> String {
         return "—".to_string();
     };
     let local: DateTime<Local> = dt_utc.into();
-    local.format("%d/%m/%Y %H:%M").to_string()
+    local.format(&t!("common.time.datetime_format")).to_string()
 }
 
 #[cfg(test)]
@@ -776,7 +795,10 @@ mod tests {
 
     #[test]
     fn remote_path_helpers_work() {
-        assert_eq!(join_remote_path("/home/gigi", "notes.txt"), "/home/gigi/notes.txt");
+        assert_eq!(
+            join_remote_path("/home/gigi", "notes.txt"),
+            "/home/gigi/notes.txt"
+        );
         assert_eq!(join_remote_path("/", "etc"), "/etc");
         assert_eq!(join_remote_path("/home/gigi/", "docs"), "/home/gigi/docs");
         assert_eq!(join_remote_path("/home/gigi", "/tmp/a"), "/tmp/a");
@@ -792,8 +814,8 @@ mod tests {
     #[test]
     fn windows_quoted_and_drag_drop_paths_are_cleaned() {
         assert_eq!(
-            resolve_local_path(r#" "C:\Users\Gigi\Desktop\mon fichier.txt" "#),
-            PathBuf::from(r"C:\Users\Gigi\Desktop\mon fichier.txt")
+            resolve_local_path(r#" "C:\Users\Gigi\Desktop\my file.txt" "#),
+            PathBuf::from(r"C:\Users\Gigi\Desktop\my file.txt")
         );
         assert_eq!(
             resolve_local_path(r#"& 'C:\Users\Gigi\test.pdf'"#),
@@ -803,9 +825,13 @@ mod tests {
 
     #[test]
     fn formatting_helpers_work() {
-        assert_eq!(format_size(512), "512 o");
-        assert_eq!(format_size(2048), "2.0 Ko");
-        assert_eq!(format_size(5 * 1024 * 1024), "5.0 Mo");
+        let fr = ["o", "Ko", "Mo", "Go"];
+        assert_eq!(format_size_with(512, &fr, ","), "512 o");
+        assert_eq!(format_size_with(2048, &fr, ","), "2,0 Ko");
+        assert_eq!(
+            format_size_with(5 * 1024 * 1024, &["B", "KB", "MB", "GB"], "."),
+            "5.0 MB"
+        );
         assert_eq!(format_permissions(Some(0o755), true, false), "drwxr-xr-x");
         assert_eq!(format_permissions(Some(0o644), false, false), "-rw-r--r--");
     }
