@@ -2138,7 +2138,7 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
 }
 
 fn draw_form_modal(frame: &mut Frame, area: Rect, form: &HostForm) {
-    let popup = centered_rect(76, 23, area);
+    let popup = centered_rect(86, 23, area);
     frame.render_widget(Clear, popup);
 
     let title = if let Some(ref orig) = form.editing_original_name {

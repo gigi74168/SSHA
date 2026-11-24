@@ -15,16 +15,17 @@ Save your machines once (e.g. `192.168.1.192` + password or SSH key) or import y
 
 ## Screenshots
 
-> The screenshots below were taken with the French interface of an earlier version; the interface is now available in 6 languages.
+### Saved connections with live CPU / RAM (`ssha`)
+![SSH connections list with live CPU and RAM usage in ssha](assets/screenshots/home.png)
 
-### Saved connections list (`ssha`)
-![SSH connections list in ssha](https://raw.githubusercontent.com/gigi74168/SSHA/main/assets/screenshots/home.png)
-
-### Quick commands with autocompletion (`/new`, `/files`, `/export`, `/import-ssh`...)
-![Slash commands menu in ssha](https://raw.githubusercontent.com/gigi74168/SSHA/main/assets/screenshots/slash-commands.png)
+### Quick commands with autocompletion (`/new`, `/files`, `/monitor`, `/lang`...)
+![Slash commands menu in ssha](assets/screenshots/slash-commands.png)
 
 ### Adding a new machine (`/new`)
-![New SSH connection form in ssha](https://raw.githubusercontent.com/gigi74168/SSHA/main/assets/screenshots/new-modal.png)
+![New SSH connection form in ssha](assets/screenshots/new-modal.png)
+
+### "What's new" screen after an update
+![What's new screen in ssha](assets/screenshots/whats-new.png)
 
 ---
 
