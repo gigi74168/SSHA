@@ -30,7 +30,7 @@ elif [ -f "./Cargo.toml" ] && grep -q 'name = "ssha"' ./Cargo.toml 2>/dev/null; 
 fi
 
 install_from_local_build() {
-    command -v cargo >/dev/null 2>&1 || error "Rust/Cargo n'est pas installé. Installe-le via https://rustup.rs puis relance ce script."
+    command -v cargo >/dev/null 2>&1 || error "Rust/Cargo is not installed. Install it from https://rustup.rs then run this script again."
     info "Compilation de ssha en mode release depuis $REPO_ROOT..."
     (cd "$REPO_ROOT" && cargo build --release)
     cp "$REPO_ROOT/target/release/$BIN_NAME" "$DEST"
@@ -45,21 +45,21 @@ install_from_release() {
             case "$ARCH" in
                 x86_64|amd64) ASSET="ssha-linux-x86_64" ;;
                 aarch64|arm64) ASSET="ssha-linux-aarch64" ;;
-                *) error "Architecture Linux non supportée : $ARCH. Compile depuis les sources avec cargo." ;;
+                *) error "Unsupported Linux architecture: $ARCH. Build from source with cargo." ;;
             esac
             ;;
         Darwin)
             case "$ARCH" in
                 arm64|aarch64) ASSET="ssha-macos-aarch64" ;;
                 x86_64) ASSET="ssha-macos-x86_64" ;;
-                *) error "Architecture macOS non supportée : $ARCH. Compile depuis les sources avec cargo." ;;
+                *) error "Unsupported macOS architecture: $ARCH. Build from source with cargo." ;;
             esac
             ;;
-        *) error "Système non supporté par ce script : $OS." ;;
+        *) error "System not supported by this script: $OS." ;;
     esac
 
     URL="https://github.com/$REPO/releases/latest/download/$ASSET"
-    info "Téléchargement de $ASSET depuis GitHub Releases..."
+    info "Downloading $ASSET from GitHub Releases..."
     TMP_FILE="$(mktemp)"
     trap 'rm -f "$TMP_FILE"' EXIT
 
@@ -72,7 +72,7 @@ install_from_release() {
             return 1
         fi
     else
-        error "curl ou wget est requis pour télécharger le binaire."
+        error "curl or wget is required to download the binary."
     fi
 
     mv "$TMP_FILE" "$DEST"
@@ -82,7 +82,7 @@ install_from_release() {
 }
 
 if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/target/release/$BIN_NAME" ] && [ "${SSHA_REBUILD:-0}" != "1" ]; then
-    info "Installation du binaire déjà compilé ($REPO_ROOT/target/release/$BIN_NAME)..."
+    info "Installing the already built binary ($REPO_ROOT/target/release/$BIN_NAME)..."
     cp "$REPO_ROOT/target/release/$BIN_NAME" "$DEST"
     chmod 755 "$DEST"
 elif [ -n "$REPO_ROOT" ] && command -v cargo >/dev/null 2>&1; then
@@ -90,10 +90,10 @@ elif [ -n "$REPO_ROOT" ] && command -v cargo >/dev/null 2>&1; then
 else
     if ! install_from_release; then
         if [ -n "$REPO_ROOT" ]; then
-            warn "Aucune release précompilée trouvée, compilation locale..."
+            warn "No prebuilt release found, building locally..."
             install_from_local_build
         else
-            error "Aucune release précompilée disponible pour l'instant. Clone le dépôt https://github.com/$REPO et lance ./installers/install.sh avec Cargo installé."
+            error "No prebuilt release available yet. Clone https://github.com/$REPO and run ./installers/install.sh with Cargo installed."
         fi
     fi
 fi
@@ -103,8 +103,8 @@ add_to_path_file() {
     local rc_file="$1"
     local line="$2"
     if [ -f "$rc_file" ] && ! grep -Fq "$INSTALL_DIR" "$rc_file"; then
-        printf '\n# Ajouté par l'\''installateur ssha\n%s\n' "$line" >> "$rc_file"
-        info "PATH mis à jour dans $rc_file"
+        printf '\n# Added by the ssha installer\n%s\n' "$line" >> "$rc_file"
+        info "PATH updated in $rc_file"
     fi
 }
 
@@ -118,9 +118,9 @@ case ":$PATH:" in
             touch "$FISH_CFG"
             add_to_path_file "$FISH_CFG" "fish_add_path $INSTALL_DIR"
         fi
-        warn "Ouvre un nouveau terminal (ou exécute: export PATH=\"$INSTALL_DIR:\$PATH\") pour utiliser 'ssha' partout."
+        warn "Open a new terminal (or run: export PATH=\"$INSTALL_DIR:\$PATH\") to use 'ssha' everywhere."
         ;;
 esac
 
-ok "ssha est installé dans : $DEST"
-ok "Tu peux maintenant lancer simplement : ssha"
+ok "ssha is installed in: $DEST"
+ok "You can now simply run: ssha"
