@@ -28,7 +28,7 @@ fn derive_master_key(password: &str, salt: &[u8; SALT_LEN]) -> Result<Zeroizing<
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
     argon2::Argon2::default()
         .hash_password_into(password.as_bytes(), salt, &mut *key)
-        .map_err(|e| anyhow!("Erreur de dérivation Argon2id : {e}"))?;
+        .map_err(|e| anyhow!(t!("crypto.err.argon2", error = e).into_owned()))?;
     Ok(key)
 }
 
@@ -40,7 +40,7 @@ pub fn encrypt_vault_with_password(plaintext: &[u8], password: &str) -> Result<V
 
     let key = derive_master_key(password, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&*key)
-        .map_err(|e| anyhow!("Impossible d'initialiser le chiffrement AES-256-GCM: {e}"))?;
+        .map_err(|e| anyhow!(t!("crypto.err.cipher_init", error = e).into_owned()))?;
 
     let nonce = Nonce::generate();
     let ciphertext = cipher
@@ -51,7 +51,7 @@ pub fn encrypt_vault_with_password(plaintext: &[u8], password: &str) -> Result<V
                 aad: VAULT_AAD_V2,
             },
         )
-        .map_err(|e| anyhow!("Erreur lors du chiffrement du coffre-fort: {e}"))?;
+        .map_err(|e| anyhow!(t!("crypto.err.encrypt", error = e).into_owned()))?;
 
     let mut output = Vec::with_capacity(4 + 1 + SALT_LEN + NONCE_LEN + ciphertext.len());
     output.extend_from_slice(VAULT_MAGIC);
@@ -66,10 +66,10 @@ pub fn encrypt_vault_with_password(plaintext: &[u8], password: &str) -> Result<V
 pub fn decrypt_vault_with_password(data: &[u8], password: &str) -> Result<Zeroizing<Vec<u8>>> {
     let header_len = 4 + 1 + SALT_LEN + NONCE_LEN;
     if data.len() < header_len + 16 {
-        bail!("Fichier coffre-fort invalide ou tronqué.");
+        bail!(t!("crypto.err.truncated").into_owned());
     }
     if &data[0..4] != VAULT_MAGIC || data[4] != VAULT_FORMAT_MASTER_V2 {
-        bail!("Format de coffre-fort protégé par mot de passe maître invalide.");
+        bail!(t!("crypto.err.master_format").into_owned());
     }
 
     let salt: [u8; SALT_LEN] = data[5..5 + SALT_LEN]
@@ -83,7 +83,7 @@ pub fn decrypt_vault_with_password(data: &[u8], password: &str) -> Result<Zeroiz
 
     let key = derive_master_key(password, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&*key)
-        .map_err(|e| anyhow!("Impossible d'initialiser le déchiffrement AES-256-GCM: {e}"))?;
+        .map_err(|e| anyhow!(t!("crypto.err.cipher_init", error = e).into_owned()))?;
 
     let plaintext = cipher
         .decrypt(
@@ -93,7 +93,7 @@ pub fn decrypt_vault_with_password(data: &[u8], password: &str) -> Result<Zeroiz
                 aad: VAULT_AAD_V2,
             },
         )
-        .map_err(|_| anyhow!("Mot de passe maître incorrect (ou coffre-fort altéré)."))?;
+        .map_err(|_| anyhow!(t!("crypto.err.wrong_master").into_owned()))?;
 
     Ok(Zeroizing::new(plaintext))
 }
@@ -101,7 +101,7 @@ pub fn decrypt_vault_with_password(data: &[u8], password: &str) -> Result<Zeroiz
 /// Encrypts plaintext using AES-256-GCM with an automatically managed 256-bit key.
 pub fn encrypt_vault(plaintext: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| anyhow!("Impossible d'initialiser le chiffrement AES-256-GCM: {e}"))?;
+        .map_err(|e| anyhow!(t!("crypto.err.cipher_init", error = e).into_owned()))?;
 
     let nonce = Nonce::generate();
     let ciphertext = cipher
@@ -112,7 +112,7 @@ pub fn encrypt_vault(plaintext: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
                 aad: VAULT_AAD,
             },
         )
-        .map_err(|e| anyhow!("Erreur lors du chiffrement du coffre-fort: {e}"))?;
+        .map_err(|e| anyhow!(t!("crypto.err.encrypt", error = e).into_owned()))?;
 
     let mut output = Vec::with_capacity(4 + 1 + NONCE_LEN + ciphertext.len());
     output.extend_from_slice(VAULT_MAGIC);
@@ -126,17 +126,18 @@ pub fn encrypt_vault(plaintext: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
 pub fn decrypt_vault(data: &[u8], key: &[u8; KEY_LEN]) -> Result<Zeroizing<Vec<u8>>> {
     let header_len = 4 + 1 + NONCE_LEN;
     if data.len() < header_len + 16 {
-        bail!("Fichier coffre-fort invalide ou tronqué.");
+        bail!(t!("crypto.err.truncated").into_owned());
     }
     if &data[0..4] != VAULT_MAGIC {
-        bail!("Signature de coffre-fort invalide (fichier corrompu ou non reconnu).");
+        bail!(t!("crypto.err.signature").into_owned());
     }
     if data[4] != VAULT_FORMAT_VERSION {
-        bail!(
-            "Version de coffre-fort non supportée: {} (attendu {}).",
-            data[4],
-            VAULT_FORMAT_VERSION
-        );
+        bail!(t!(
+            "crypto.err.version",
+            found = data[4],
+            expected = VAULT_FORMAT_VERSION
+        )
+        .into_owned());
     }
 
     let nonce_bytes: [u8; NONCE_LEN] = data[5..header_len]
@@ -146,7 +147,7 @@ pub fn decrypt_vault(data: &[u8], key: &[u8; KEY_LEN]) -> Result<Zeroizing<Vec<u
     let ciphertext = &data[header_len..];
 
     let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| anyhow!("Impossible d'initialiser le déchiffrement AES-256-GCM: {e}"))?;
+        .map_err(|e| anyhow!(t!("crypto.err.cipher_init", error = e).into_owned()))?;
 
     let plaintext = cipher
         .decrypt(
@@ -156,9 +157,7 @@ pub fn decrypt_vault(data: &[u8], key: &[u8; KEY_LEN]) -> Result<Zeroizing<Vec<u
                 aad: VAULT_AAD,
             },
         )
-        .map_err(|_| {
-            anyhow!("Échec du déchiffrement du coffre-fort (clé incorrecte ou fichier altéré).")
-        })?;
+        .map_err(|_| anyhow!(t!("crypto.err.decrypt").into_owned()))?;
 
     Ok(Zeroizing::new(plaintext))
 }
@@ -170,7 +169,7 @@ pub fn decrypt_vault(data: &[u8], key: &[u8; KEY_LEN]) -> Result<Zeroizing<Vec<u
 pub fn load_or_create_key(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     if key_path.exists() {
         let raw = fs::read(key_path)
-            .with_context(|| format!("Impossible de lire la clé: {}", key_path.display()))?;
+            .with_context(|| t!("crypto.err.read_key", path = key_path.display()).into_owned())?;
         return unwrap_key(&raw);
     }
 
@@ -191,11 +190,7 @@ fn wrap_key(key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
 #[cfg(unix)]
 fn unwrap_key(raw: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     if raw.len() != KEY_LEN {
-        bail!(
-            "Fichier clé invalide ({} octets au lieu de {}).",
-            raw.len(),
-            KEY_LEN
-        );
+        bail!(t!("crypto.err.key_size", found = raw.len(), expected = KEY_LEN).into_owned());
     }
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
     key.copy_from_slice(raw);
@@ -232,7 +227,7 @@ fn wrap_key(key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
     };
 
     if ok == 0 || output.pbData.is_null() {
-        bail!("Échec de la protection de clé via Windows DPAPI.");
+        bail!(t!("crypto.err.dpapi_protect").into_owned());
     }
 
     let protected_slice =
@@ -262,7 +257,7 @@ fn unwrap_key(raw: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
             key.copy_from_slice(raw);
             return Ok(key);
         }
-        bail!("Format de fichier clé Windows non reconnu.");
+        bail!(t!("crypto.err.dpapi_format").into_owned());
     }
 
     let blob = &raw[DPAPI_PREFIX.len()..];
@@ -288,7 +283,7 @@ fn unwrap_key(raw: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     };
 
     if ok == 0 || output.pbData.is_null() {
-        bail!("Échec du déchiffrement de clé via Windows DPAPI.");
+        bail!(t!("crypto.err.dpapi_unprotect").into_owned());
     }
 
     let unprotected = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) };
@@ -296,7 +291,7 @@ fn unwrap_key(raw: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
         unsafe {
             LocalFree(output.pbData as *mut _);
         }
-        bail!("Taille de clé déchiffrée invalide.");
+        bail!(t!("crypto.err.decrypted_key_size").into_owned());
     }
 
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
@@ -321,7 +316,7 @@ pub fn write_secret_file(path: &Path, content: &[u8]) -> Result<()> {
             .truncate(true)
             .mode(0o600)
             .open(path)
-            .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
+            .with_context(|| t!("common.err.write", path = path.display()).into_owned())?;
         file.write_all(content)?;
         file.sync_all()?;
         Ok(())
@@ -330,19 +325,19 @@ pub fn write_secret_file(path: &Path, content: &[u8]) -> Result<()> {
     #[cfg(not(unix))]
     {
         fs::write(path, content)
-            .with_context(|| format!("Impossible d'écrire {}", path.display()))?;
+            .with_context(|| t!("common.err.write", path = path.display()).into_owned())?;
         Ok(())
     }
 }
 
-pub fn protection_summary() -> &'static str {
+pub fn protection_summary() -> String {
     #[cfg(windows)]
     {
-        "AES-256-GCM + clé automatique protégée par Windows DPAPI"
+        t!("crypto.summary_windows").into_owned()
     }
     #[cfg(unix)]
     {
-        "AES-256-GCM + clé automatique locale (permissions 0600)"
+        t!("crypto.summary_unix").into_owned()
     }
 }
 
@@ -380,10 +375,10 @@ mod tests {
     #[test]
     fn master_password_roundtrip_and_wrong_password_rejected() {
         let plaintext = b"{\"hosts\":[{\"name\":\"srv\"}]}";
-        let enc = encrypt_vault_with_password(plaintext, "mon-mdp-maitre").unwrap();
+        let enc = encrypt_vault_with_password(plaintext, "my-master-pass").unwrap();
         assert!(is_master_password_vault(&enc));
 
-        let dec = decrypt_vault_with_password(&enc, "mon-mdp-maitre").unwrap();
+        let dec = decrypt_vault_with_password(&enc, "my-master-pass").unwrap();
         assert_eq!(dec.as_slice(), plaintext);
 
         assert!(decrypt_vault_with_password(&enc, "mauvais-mdp").is_err());

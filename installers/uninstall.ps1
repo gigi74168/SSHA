@@ -1,4 +1,4 @@
-# Désinstallateur Windows 10 / 11 pour ssha
+# Windows 10 / 11 uninstaller for ssha
 [CmdletBinding()]
 param(
     [switch]$Purge
@@ -9,9 +9,9 @@ $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ssha"
 
 if (Test-Path $InstallDir) {
     Remove-Item -Path $InstallDir -Recurse -Force
-    Write-Host "[✓] Supprimé : $InstallDir" -ForegroundColor Green
+    Write-Host "[✓] Removed: $InstallDir" -ForegroundColor Green
 } else {
-    Write-Host "[!] Aucune installation trouvée dans $InstallDir" -ForegroundColor Yellow
+    Write-Host "[!] No installation found in $InstallDir" -ForegroundColor Yellow
 }
 
 # Clean User PATH
@@ -21,14 +21,14 @@ if ($UserPath) {
         $_.Trim() -ne "" -and ($_.TrimEnd('\') -ine $InstallDir.TrimEnd('\'))
     }
     [Environment]::SetEnvironmentVariable("Path", ($Filtered -join ';'), "User")
-    Write-Host "[✓] PATH utilisateur nettoyé." -ForegroundColor Green
+    Write-Host "[✓] User PATH cleaned." -ForegroundColor Green
 }
 
 $ConfigDir = Join-Path $env:APPDATA "ssha"
 if ($Purge -and (Test-Path $ConfigDir)) {
     Remove-Item -Path $ConfigDir -Recurse -Force
-    Write-Host "[✓] Coffre-fort supprimé : $ConfigDir" -ForegroundColor Green
+    Write-Host "[✓] Vault removed: $ConfigDir" -ForegroundColor Green
 } elseif (Test-Path $ConfigDir) {
-    Write-Host "[i] Ton coffre-fort chiffré a été conservé dans : $ConfigDir" -ForegroundColor Cyan
-    Write-Host "    Relance avec -Purge pour supprimer aussi les connexions enregistrées."
+    Write-Host "[i] Your encrypted vault was kept in: $ConfigDir" -ForegroundColor Cyan
+    Write-Host "    Run again with -Purge to also delete the saved connections."
 }

@@ -17,10 +17,10 @@ pub enum AuthMethod {
 }
 
 impl AuthMethod {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            AuthMethod::Password { .. } => "MDP",
-            AuthMethod::Key { .. } => "CLÉ",
+            AuthMethod::Password { .. } => t!("common.auth_password").into_owned(),
+            AuthMethod::Key { .. } => t!("common.auth_key").into_owned(),
         }
     }
 
@@ -52,10 +52,7 @@ impl fmt::Debug for AuthMethod {
             AuthMethod::Key { path, passphrase } => f
                 .debug_struct("Key")
                 .field("path", path)
-                .field(
-                    "passphrase",
-                    &passphrase.as_ref().map(|_| "[REDACTED]"),
-                )
+                .field("passphrase", &passphrase.as_ref().map(|_| "[REDACTED]"))
                 .finish(),
         }
     }
@@ -86,22 +83,22 @@ impl LocalForwardSpec {
                 (
                     b.trim_matches(['[', ']']).to_string(),
                     p.parse::<u16>()
-                        .map_err(|_| format!("Port local invalide dans '{}'", input))?,
+                        .map_err(|_| t!("models.err.local_port", input = input).into_owned())?,
                 )
             } else {
                 (
                     default_bind_addr(),
                     space_parts[0]
                         .parse::<u16>()
-                        .map_err(|_| format!("Port local invalide dans '{}'", input))?,
+                        .map_err(|_| t!("models.err.local_port", input = input).into_owned())?,
                 )
             };
             let (remote_host, rp) = space_parts[1]
                 .rsplit_once(':')
-                .ok_or_else(|| format!("Destination distante invalide dans '{}'", input))?;
+                .ok_or_else(|| t!("models.err.remote_dest", input = input).into_owned())?;
             let remote_port = rp
                 .parse::<u16>()
-                .map_err(|_| format!("Port distant invalide dans '{}'", input))?;
+                .map_err(|_| t!("models.err.remote_port", input = input).into_owned())?;
             return Ok(Self {
                 bind_addr,
                 local_port,
@@ -117,26 +114,23 @@ impl LocalForwardSpec {
                 bind_addr: default_bind_addr(),
                 local_port: lp
                     .parse::<u16>()
-                    .map_err(|_| format!("Port local invalide dans '{}'", input))?,
+                    .map_err(|_| t!("models.err.local_port", input = input).into_owned())?,
                 remote_host: (*rh).to_string(),
                 remote_port: rp
                     .parse::<u16>()
-                    .map_err(|_| format!("Port distant invalide dans '{}'", input))?,
+                    .map_err(|_| t!("models.err.remote_port", input = input).into_owned())?,
             }),
             [ba, lp, rh, rp] => Ok(Self {
                 bind_addr: (*ba).to_string(),
                 local_port: lp
                     .parse::<u16>()
-                    .map_err(|_| format!("Port local invalide dans '{}'", input))?,
+                    .map_err(|_| t!("models.err.local_port", input = input).into_owned())?,
                 remote_host: (*rh).to_string(),
                 remote_port: rp
                     .parse::<u16>()
-                    .map_err(|_| format!("Port distant invalide dans '{}'", input))?,
+                    .map_err(|_| t!("models.err.remote_port", input = input).into_owned())?,
             }),
-            _ => Err(format!(
-                "Format LocalForward invalide '{}' (attendu ex: 8080:127.0.0.1:80)",
-                input
-            )),
+            _ => Err(t!("models.err.forward_format", input = input).into_owned()),
         }
     }
 }
@@ -179,6 +173,9 @@ pub struct SshHost {
     /// Whether agent forwarding was requested (preserved from ~/.ssh/config).
     #[serde(default, skip_serializing_if = "is_false")]
     pub forward_agent: bool,
+    /// Live CPU/RAM monitoring of this machine in the `ssha` list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub monitor: bool,
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -274,19 +271,19 @@ pub struct KnownHostEntry {
 
 pub fn format_relative_time(dt: Option<DateTime<Utc>>) -> String {
     let Some(dt) = dt else {
-        return "jamais".to_string();
+        return t!("common.time.never").into_owned();
     };
     let delta = Utc::now().signed_duration_since(dt);
     let secs = delta.num_seconds();
     if secs < 60 {
-        "à l'instant".to_string()
+        t!("common.time.just_now").into_owned()
     } else if secs < 3600 {
-        format!("il y a {} min", secs / 60)
+        t!("common.time.minutes_ago", n = secs / 60).into_owned()
     } else if secs < 86400 {
-        format!("il y a {} h", secs / 3600)
+        t!("common.time.hours_ago", n = secs / 3600).into_owned()
     } else if secs < 86400 * 30 {
-        format!("il y a {} j", secs / 86400)
+        t!("common.time.days_ago", n = secs / 86400).into_owned()
     } else {
-        dt.format("%d/%m/%Y").to_string()
+        dt.format(&t!("common.time.date_format")).to_string()
     }
 }

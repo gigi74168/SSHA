@@ -1,3 +1,4 @@
+use crate::i18n::{self, tn, tr};
 use crate::models::SshHost;
 use crate::picker::{self, PickerResult};
 use crate::sftp::{
@@ -27,70 +28,81 @@ use std::time::Duration;
 #[derive(Clone, Copy)]
 struct FileSlashCmd {
     cmd: &'static str,
-    usage: &'static str,
-    desc: &'static str,
+    /// Translation key of the optional argument placeholder.
+    arg_key: Option<&'static str>,
+    /// Translation key of the description.
+    desc_key: &'static str,
+}
+
+impl FileSlashCmd {
+    fn usage(&self) -> String {
+        match self.arg_key {
+            Some(k) => format!("{} [{}]", self.cmd, tr(k)),
+            None => self.cmd.to_string(),
+        }
+    }
 }
 
 const FILE_SLASH_COMMANDS: &[FileSlashCmd] = &[
     FileSlashCmd {
         cmd: "/download",
-        usage: "/download",
-        desc: "Télécharger le fichier/dossier sélectionné sur ce PC",
+        arg_key: None,
+        desc_key: "files.slash.download",
     },
     FileSlashCmd {
         cmd: "/upload",
-        usage: "/upload",
-        desc: "Envoyer un fichier ou dossier (fenêtre Windows/Linux)",
+        arg_key: None,
+        desc_key: "files.slash.upload",
     },
     FileSlashCmd {
         cmd: "/upload-dir",
-        usage: "/upload-dir",
-        desc: "Envoyer un dossier entier vers le PC distant",
+        arg_key: None,
+        desc_key: "files.slash.upload_dir",
     },
     FileSlashCmd {
         cmd: "/mkdir",
-        usage: "/mkdir [nom]",
-        desc: "Créer un nouveau dossier distant",
+        arg_key: Some("tui.arg.name"),
+        desc_key: "files.slash.mkdir",
     },
     FileSlashCmd {
         cmd: "/rename",
-        usage: "/rename [nom]",
-        desc: "Renommer l'élément sélectionné",
+        arg_key: Some("tui.arg.name"),
+        desc_key: "files.slash.rename",
     },
     FileSlashCmd {
         cmd: "/del",
-        usage: "/del",
-        desc: "Supprimer l'élément sélectionné",
+        arg_key: None,
+        desc_key: "files.slash.del",
     },
     FileSlashCmd {
         cmd: "/view",
-        usage: "/view",
-        desc: "Afficher l'aperçu du fichier sélectionné",
+        arg_key: None,
+        desc_key: "files.slash.view",
     },
     FileSlashCmd {
         cmd: "/cd",
-        usage: "/cd <chemin>",
-        desc: "Aller directement vers un dossier distant",
+        arg_key: Some("tui.arg.path"),
+        desc_key: "files.slash.cd",
     },
     FileSlashCmd {
         cmd: "/hidden",
-        usage: "/hidden",
-        desc: "Afficher / masquer les fichiers cachés",
+        arg_key: None,
+        desc_key: "files.slash.hidden",
     },
     FileSlashCmd {
         cmd: "/refresh",
-        usage: "/refresh",
-        desc: "Rafraîchir la liste des fichiers",
+        arg_key: None,
+        desc_key: "files.slash.refresh",
     },
     FileSlashCmd {
         cmd: "/help",
-        usage: "/help",
-        desc: "Afficher l'aide et les raccourcis",
+        arg_key: None,
+        desc_key: "tui.slash.help",
     },
     FileSlashCmd {
         cmd: "/quit",
-        usage: "/quit",
-        desc: "Fermer et revenir au menu ssha",
+        arg_key: None,
+        desc_key: "files.slash.quit",
     },
 ];
 
@@ -108,10 +120,17 @@ struct StatusMsg {
 }
 
 enum PromptKind {
-    Download { remote_path: String, remote_name: String, is_dir: bool },
+    Download {
+        remote_path: String,
+        remote_name: String,
+        is_dir: bool,
+    },
     Upload,
     Mkdir,
-    Rename { old_path: String, old_name: String },
+    Rename {
+        old_path: String,
+        old_name: String,
+    },
 }
 
 enum FileModal {
@@ -171,7 +190,7 @@ impl FileExplorerState {
             modal: FileModal::None,
             status: Some(StatusMsg {
                 level: StatusLevel::Success,
-                text: "Connecté en SFTP. Appuie sur Ctrl+D pour télécharger un fichier/dossier.".into(),
+                text: t!("files.status.connected").into_owned(),
             }),
         }
     }
@@ -285,15 +304,24 @@ pub async fn run_files_tui(
     initial_path: Option<&str>,
 ) -> Result<()> {
     eprintln!(
-        "\x1b[1;36m[ssha]\x1b[0m Ouverture du gestionnaire de fichiers SFTP sur \x1b[1m{}\x1b[0m ({})...",
-        host.name,
-        host.endpoint_display()
+        "\x1b[1;36m[ssha]\x1b[0m {}",
+        t!(
+            "files.opening",
+            name = format!("\x1b[1m{}\x1b[0m", host.name),
+            endpoint = host.endpoint_display()
+        )
     );
 
     let client = SftpClient::connect(host, storage).await?;
     let start_dir = match initial_path {
-        Some(p) => client.canonicalize(p).await.unwrap_or_else(|_| p.to_string()),
-        None => client.canonicalize(".").await.unwrap_or_else(|_| "/".to_string()),
+        Some(p) => client
+            .canonicalize(p)
+            .await
+            .unwrap_or_else(|_| p.to_string()),
+        None => client
+            .canonicalize(".")
+            .await
+            .unwrap_or_else(|_| "/".to_string()),
     };
     let entries = client.list_dir(&start_dir).await?;
 
@@ -386,9 +414,11 @@ async fn handle_file_key(
             Ok(false)
         }
         FileModal::Help => {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::F(1))
-                || (key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')))
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::F(1)
+            ) || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')))
             {
                 state.modal = FileModal::None;
             }
@@ -435,9 +465,9 @@ async fn handle_main_file_key(
                 state.set_status(
                     StatusLevel::Info,
                     if state.show_hidden {
-                        "Fichiers cachés affichés."
+                        t!("files.status.hidden_shown")
                     } else {
-                        "Fichiers cachés masqués."
+                        t!("files.status.hidden_masked")
                     },
                 );
                 return Ok(false);
@@ -570,7 +600,7 @@ async fn execute_file_slash_command(
             } else {
                 state.set_status(
                     StatusLevel::Error,
-                    format!("Commande inconnue '{}'. Tape /help pour la liste.", typed),
+                    t!("tui.status.unknown_command", cmd = typed),
                 );
                 return Ok(false);
             }
@@ -596,13 +626,13 @@ async fn execute_file_slash_command(
                             refresh_dir(state, client).await;
                             state.set_status(
                                 StatusLevel::Success,
-                                format!("Renommé '{}' → '{}'.", entry.name, new_name),
+                                t!("files.status.renamed", from = entry.name, to = new_name),
                             );
                         }
                         Err(e) => state.set_status(StatusLevel::Error, format!("{e}")),
                     }
                 } else {
-                    state.set_status(StatusLevel::Info, "Sélectionne un élément à renommer.");
+                    state.set_status(StatusLevel::Info, t!("files.status.select_first"));
                 }
             } else {
                 open_rename_modal(state);
@@ -612,12 +642,12 @@ async fn execute_file_slash_command(
         "/view" => {
             if let Some(entry) = state.selected_entry_owned() {
                 if entry.is_dir {
-                    state.set_status(StatusLevel::Info, "Impossible d'afficher l'aperçu d'un dossier.");
+                    state.set_status(StatusLevel::Info, t!("files.status.no_dir_preview"));
                 } else {
                     open_preview(state, client, &entry).await;
                 }
             } else {
-                state.set_status(StatusLevel::Info, "Sélectionne un fichier pour l'aperçu.");
+                state.set_status(StatusLevel::Info, t!("files.status.select_first"));
             }
         }
         "/cd" => {
@@ -639,9 +669,9 @@ async fn execute_file_slash_command(
             state.set_status(
                 StatusLevel::Info,
                 if state.show_hidden {
-                    "Fichiers cachés affichés."
+                    t!("files.status.hidden_shown")
                 } else {
-                    "Fichiers cachés masqués."
+                    t!("files.status.hidden_masked")
                 },
             );
         }
@@ -656,20 +686,24 @@ async fn execute_file_slash_command(
 
 fn open_download_modal(state: &mut FileExplorerState) {
     let Some(entry) = state.selected_entry_owned() else {
-        state.set_status(StatusLevel::Info, "Sélectionne un fichier ou dossier à télécharger.");
+        state.set_status(StatusLevel::Info, t!("files.status.select_first"));
         return;
     };
     let default_dest = default_download_dir().join(&entry.name);
-    let kind_label = if entry.is_dir { "dossier" } else { "fichier" };
+    let title = if entry.is_dir {
+        t!("files.download.title_dir", name = entry.name)
+    } else {
+        t!("files.download.title_file", name = entry.name)
+    };
     state.modal = FileModal::Input {
         kind: PromptKind::Download {
             remote_path: entry.path,
             remote_name: entry.name.clone(),
             is_dir: entry.is_dir,
         },
-        title: format!(" Télécharger le {kind_label} '{}' ", entry.name),
-        label: "Destination locale : ".to_string(),
-        hint: "Entrée: télécharger ici  │  Ctrl+P / F3: choisir un dossier (fenêtre Windows/Linux)".to_string(),
+        title: format!(" {title} "),
+        label: format!("{} : ", t!("files.download.label")),
+        hint: t!("files.download.hint").into_owned(),
         value: default_dest.to_string_lossy().to_string(),
         error: None,
     };
@@ -682,9 +716,9 @@ fn open_upload_modal(state: &mut FileExplorerState) {
 fn open_manual_upload_modal(state: &mut FileExplorerState) {
     state.modal = FileModal::Input {
         kind: PromptKind::Upload,
-        title: format!(" Envoyer vers {} ", state.cwd),
-        label: "Fichier / dossier local : ".to_string(),
-        hint: "Ex: ~/Desktop/rapport.pdf ou C:\\Users\\Moi\\Dossier".to_string(),
+        title: format!(" {} ", t!("files.upload.title", path = state.cwd)),
+        label: format!("{} : ", t!("files.upload.label")),
+        hint: t!("files.upload.hint").into_owned(),
         value: String::new(),
         error: None,
     };
@@ -723,16 +757,16 @@ async fn pick_and_upload(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) {
     let title = if pick_dir {
-        format!("Choisir un dossier à envoyer vers {}", state.cwd)
+        t!("cli.sftp.pick_folder_title", name = state.cwd).into_owned()
     } else {
-        format!("Choisir un fichier à envoyer vers {}", state.cwd)
+        t!("cli.sftp.pick_file_title", name = state.cwd).into_owned()
     };
     state.set_status(
         StatusLevel::Info,
         if pick_dir {
-            "Ouverture de la fenêtre de sélection de dossier..."
+            t!("files.status.opening_folder_picker")
         } else {
-            "Ouverture de la fenêtre de sélection de fichier..."
+            t!("files.status.opening_file_picker")
         },
     );
     let _ = terminal.draw(|f| draw_files_ui(f, state));
@@ -752,14 +786,11 @@ async fn pick_and_upload(
             perform_upload(state, &path, client, terminal).await;
         }
         PickerResult::Cancelled => {
-            state.set_status(StatusLevel::Info, "Envoi annulé.");
+            state.set_status(StatusLevel::Info, t!("cli.sftp.upload_cancelled"));
         }
         PickerResult::Unavailable => {
             open_manual_upload_modal(state);
-            state.set_status(
-                StatusLevel::Info,
-                "Aucune interface graphique détectée : saisis le chemin local manuellement.",
-            );
+            state.set_status(StatusLevel::Info, t!("files.status.no_gui"));
         }
     }
 }
@@ -772,7 +803,11 @@ async fn perform_upload(
 ) {
     state.set_status(
         StatusLevel::Info,
-        format!("Envoi de '{}' vers {}...", local_src.display(), state.cwd),
+        t!(
+            "files.status.uploading",
+            path = local_src.display(),
+            dest = state.cwd
+        ),
     );
     let _ = terminal.draw(|f| draw_files_ui(f, state));
 
@@ -781,16 +816,19 @@ async fn perform_upload(
             refresh_dir(state, client).await;
             state.set_status(
                 StatusLevel::Success,
-                format!(
-                    "Envoyé ({} fichier(s), {}) → {}",
-                    stats.files,
-                    format_size(stats.bytes),
-                    remote_dest
+                t!(
+                    "files.status.uploaded",
+                    files = tn("common.files", stats.files as u64, &[]),
+                    size = format_size(stats.bytes),
+                    dest = remote_dest
                 ),
             );
         }
         Err(e) => {
-            state.set_status(StatusLevel::Error, format!("Échec envoi : {e:#}"));
+            state.set_status(
+                StatusLevel::Error,
+                t!("files.status.upload_failed", error = format!("{e:#}")),
+            );
         }
     }
 }
@@ -798,9 +836,9 @@ async fn perform_upload(
 fn open_mkdir_modal(state: &mut FileExplorerState, prefill: Option<&str>) {
     state.modal = FileModal::Input {
         kind: PromptKind::Mkdir,
-        title: " Créer un nouveau dossier distant ".to_string(),
-        label: "Nom du dossier : ".to_string(),
-        hint: format!("Sera créé dans {}", state.cwd),
+        title: format!(" {} ", t!("files.mkdir.title")),
+        label: format!("{} : ", t!("files.mkdir.label")),
+        hint: t!("files.mkdir.hint", path = state.cwd).into_owned(),
         value: prefill.unwrap_or("").to_string(),
         error: None,
     };
@@ -808,7 +846,7 @@ fn open_mkdir_modal(state: &mut FileExplorerState, prefill: Option<&str>) {
 
 fn open_rename_modal(state: &mut FileExplorerState) {
     let Some(entry) = state.selected_entry_owned() else {
-        state.set_status(StatusLevel::Info, "Sélectionne un fichier ou dossier à renommer.");
+        state.set_status(StatusLevel::Info, t!("files.status.select_first"));
         return;
     };
     state.modal = FileModal::Input {
@@ -816,9 +854,9 @@ fn open_rename_modal(state: &mut FileExplorerState) {
             old_path: entry.path,
             old_name: entry.name.clone(),
         },
-        title: format!(" Renommer '{}' ", entry.name),
-        label: "Nouveau nom : ".to_string(),
-        hint: "Entrée pour valider, Esc pour annuler.".to_string(),
+        title: format!(" {} ", t!("files.rename.title", name = entry.name)),
+        label: format!("{} : ", t!("files.rename.label")),
+        hint: t!("files.rename.hint").into_owned(),
         value: entry.name,
         error: None,
     };
@@ -826,7 +864,7 @@ fn open_rename_modal(state: &mut FileExplorerState) {
 
 fn open_delete_modal(state: &mut FileExplorerState) {
     let Some(entry) = state.selected_entry_owned() else {
-        state.set_status(StatusLevel::Info, "Sélectionne un fichier ou dossier à supprimer.");
+        state.set_status(StatusLevel::Info, t!("files.status.select_first"));
         return;
     };
     state.modal = FileModal::ConfirmDelete {
@@ -863,7 +901,7 @@ async fn handle_input_modal_key(
         } = &mut state.modal
         {
             let name = remote_name.clone();
-            let title = format!("Choisir le dossier où enregistrer '{name}'");
+            let title = t!("files.download.pick_title", name = name).into_owned();
             let res = tokio::task::spawn_blocking(move || picker::pick_folder(&title))
                 .await
                 .unwrap_or(PickerResult::Unavailable);
@@ -873,7 +911,7 @@ async fn handle_input_modal_key(
                     *error = None;
                 }
                 PickerResult::Unavailable => {
-                    *error = Some("Aucune interface graphique disponible ; saisis le chemin au clavier.".into());
+                    *error = Some(t!("files.status.no_gui").into_owned());
                 }
                 PickerResult::Cancelled => {}
             }
@@ -928,7 +966,7 @@ async fn handle_input_modal_key(
             label,
             hint,
             value,
-            error: Some("Ce champ ne peut pas être vide.".to_string()),
+            error: Some(t!("files.err.empty").into_owned()),
         };
         return Ok(());
     }
@@ -942,28 +980,34 @@ async fn handle_input_modal_key(
             let local_dest = resolve_local_path(&trimmed);
             state.set_status(
                 StatusLevel::Info,
-                format!(
-                    "Téléchargement de '{}'{}...",
-                    remote_name,
-                    if is_dir { " (dossier)" } else { "" }
-                ),
+                if is_dir {
+                    t!("files.status.downloading_dir", name = remote_name)
+                } else {
+                    t!("files.status.downloading", name = remote_name)
+                },
             );
             let _ = terminal.draw(|f| draw_files_ui(f, state));
 
-            match client.download(&remote_path, &local_dest, |_, _, _| {}).await {
+            match client
+                .download(&remote_path, &local_dest, |_, _, _| {})
+                .await
+            {
                 Ok((saved_path, stats)) => {
                     state.set_status(
                         StatusLevel::Success,
-                        format!(
-                            "Téléchargé ({} fichier(s), {}) → {}",
-                            stats.files,
-                            format_size(stats.bytes),
-                            saved_path.display()
+                        t!(
+                            "files.status.downloaded",
+                            files = tn("common.files", stats.files as u64, &[]),
+                            size = format_size(stats.bytes),
+                            dest = saved_path.display()
                         ),
                     );
                 }
                 Err(e) => {
-                    state.set_status(StatusLevel::Error, format!("Échec téléchargement : {e:#}"));
+                    state.set_status(
+                        StatusLevel::Error,
+                        t!("files.status.download_failed", error = format!("{e:#}")),
+                    );
                 }
             }
         }
@@ -971,7 +1015,11 @@ async fn handle_input_modal_key(
             let local_src = resolve_local_path(&trimmed);
             state.set_status(
                 StatusLevel::Info,
-                format!("Envoi de '{}' vers {}...", local_src.display(), state.cwd),
+                t!(
+                    "files.status.uploading",
+                    path = local_src.display(),
+                    dest = state.cwd
+                ),
             );
             let _ = terminal.draw(|f| draw_files_ui(f, state));
 
@@ -980,16 +1028,19 @@ async fn handle_input_modal_key(
                     refresh_dir(state, client).await;
                     state.set_status(
                         StatusLevel::Success,
-                        format!(
-                            "Envoyé ({} fichier(s), {}) → {}",
-                            stats.files,
-                            format_size(stats.bytes),
-                            remote_dest
+                        t!(
+                            "files.status.uploaded",
+                            files = tn("common.files", stats.files as u64, &[]),
+                            size = format_size(stats.bytes),
+                            dest = remote_dest
                         ),
                     );
                 }
                 Err(e) => {
-                    state.set_status(StatusLevel::Error, format!("Échec envoi : {e:#}"));
+                    state.set_status(
+                        StatusLevel::Error,
+                        t!("files.status.upload_failed", error = format!("{e:#}")),
+                    );
                 }
             }
         }
@@ -1000,7 +1051,7 @@ async fn handle_input_modal_key(
                     refresh_dir(state, client).await;
                     state.set_status(
                         StatusLevel::Success,
-                        format!("Dossier '{}' créé.", trimmed),
+                        t!("files.status.mkdir_done", name = trimmed),
                     );
                 }
                 Err(e) => state.set_status(StatusLevel::Error, format!("{e:#}")),
@@ -1013,7 +1064,7 @@ async fn handle_input_modal_key(
                     refresh_dir(state, client).await;
                     state.set_status(
                         StatusLevel::Success,
-                        format!("Renommé '{}' → '{}'.", old_name, trimmed),
+                        t!("files.status.renamed", from = old_name, to = trimmed),
                     );
                 }
                 Err(e) => state.set_status(StatusLevel::Error, format!("{e:#}")),
@@ -1033,11 +1084,8 @@ async fn handle_delete_modal_key(
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             state.modal = FileModal::None;
         }
-        KeyCode::Enter
-        | KeyCode::Char('o')
-        | KeyCode::Char('O')
-        | KeyCode::Char('y')
-        | KeyCode::Char('Y') => {
+        KeyCode::Char(c) if !i18n::is_yes(&c.to_string()) => {}
+        KeyCode::Enter | KeyCode::Char(_) => {
             let modal = std::mem::replace(&mut state.modal, FileModal::None);
             if let FileModal::ConfirmDelete { path, name, is_dir } = modal {
                 match client.remove_recursive(&path, is_dir).await {
@@ -1045,7 +1093,7 @@ async fn handle_delete_modal_key(
                         refresh_dir(state, client).await;
                         state.set_status(
                             StatusLevel::Success,
-                            format!("'{}' supprimé du PC distant.", name),
+                            t!("files.status.deleted", name = name),
                         );
                     }
                     Err(e) => state.set_status(StatusLevel::Error, format!("{e}")),
@@ -1080,7 +1128,7 @@ async fn refresh_dir(state: &mut FileExplorerState, client: &SftpClient) {
     match client.list_dir(&state.cwd).await {
         Ok(entries) => {
             state.entries = entries;
-            state.set_status(StatusLevel::Info, "Dossier rafraîchi.");
+            state.set_status(StatusLevel::Info, t!("files.status.refreshed"));
         }
         Err(e) => {
             state.set_status(StatusLevel::Error, format!("{e}"));
@@ -1096,9 +1144,12 @@ async fn open_preview(state: &mut FileExplorerState, client: &SftpClient, entry:
             let lines = if is_binary {
                 vec![
                     String::new(),
-                    format!("  Fichier binaire ({}) — aperçu texte indisponible.", format_size(entry.size)),
+                    format!(
+                        "  {}",
+                        t!("files.preview.binary", size = format_size(entry.size))
+                    ),
                     String::new(),
-                    "  Ferme cette fenêtre puis appuie sur Ctrl+D (ou /download) pour le télécharger.".to_string(),
+                    format!("  {}", t!("files.preview.binary_hint")),
                 ]
             } else {
                 String::from_utf8_lossy(&bytes)
@@ -1114,7 +1165,10 @@ async fn open_preview(state: &mut FileExplorerState, client: &SftpClient, entry:
             };
         }
         Err(e) => {
-            state.set_status(StatusLevel::Error, format!("Impossible de lire '{}' : {e}", entry.name));
+            state.set_status(
+                StatusLevel::Error,
+                t!("files.status.read_failed", name = entry.name, error = e),
+            );
         }
     }
 }
@@ -1138,7 +1192,8 @@ fn draw_files_ui(frame: &mut Frame, state: &FileExplorerState) {
     draw_files_input(frame, chunks[3], state);
     draw_files_footer(frame, chunks[4]);
 
-    if matches!(state.modal, FileModal::None) && state.is_slash_mode() && !state.input.contains(' ') {
+    if matches!(state.modal, FileModal::None) && state.is_slash_mode() && !state.input.contains(' ')
+    {
         draw_file_slash_popup(frame, chunks[3], state);
     }
 
@@ -1168,7 +1223,12 @@ fn draw_files_ui(frame: &mut Frame, state: &FileExplorerState) {
 
 fn draw_files_header(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
     let total = state.entries.len();
-    let hidden_tag = if state.show_hidden { "cachés: ON" } else { "cachés: OFF" };
+    let hidden_tag = if state.show_hidden {
+        format!("{}: ON", t!("files.header.hidden"))
+    } else {
+        format!("{}: OFF", t!("files.header.hidden"))
+    };
+    let items = tn("files.header.items", total as u64, &[]);
 
     let line = Line::from(vec![
         Span::styled(
@@ -1196,7 +1256,7 @@ fn draw_files_header(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("  │  {total} éléments  │  {hidden_tag}"),
+            format!("  │  {items}  │  {hidden_tag}"),
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -1213,7 +1273,7 @@ fn draw_files_table(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
 
     let block = Block::default()
         .title(Span::styled(
-            format!(" Fichiers distants — {} ", state.cwd),
+            format!(" {} — {} ", t!("files.table.title"), state.cwd),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -1223,9 +1283,9 @@ fn draw_files_table(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
 
     if rows_data.is_empty() {
         let msg = if state.input.is_empty() {
-            "Ce dossier est vide."
+            t!("files.table.empty")
         } else {
-            "Aucun fichier ne correspond au filtre."
+            t!("files.table.no_match")
         };
         let p = Paragraph::new(vec![
             Line::raw(""),
@@ -1238,11 +1298,11 @@ fn draw_files_table(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
     }
 
     let header = Row::new(vec![
-        Cell::from("  Nom"),
-        Cell::from("Type"),
-        Cell::from("Taille"),
-        Cell::from("Droits"),
-        Cell::from("Modifié"),
+        Cell::from(format!("  {}", t!("cli.list.col_name"))),
+        Cell::from(t!("files.table.col_type")),
+        Cell::from(t!("files.table.col_size")),
+        Cell::from(t!("files.table.col_perms")),
+        Cell::from(t!("files.table.col_modified")),
     ])
     .style(
         Style::default()
@@ -1265,7 +1325,8 @@ fn draw_files_table(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from("PARENT").style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(t!("files.table.type_parent"))
+                        .style(Style::default().fg(Color::DarkGray)),
                     Cell::from("—").style(Style::default().fg(Color::DarkGray)),
                     Cell::from("—").style(Style::default().fg(Color::DarkGray)),
                     Cell::from("—").style(Style::default().fg(Color::DarkGray)),
@@ -1294,11 +1355,17 @@ fn draw_files_table(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
                     };
 
                     let (type_label, type_style) = if e.is_dir {
-                        ("DOSSIER", Style::default().fg(Color::Cyan))
+                        (t!("files.table.type_dir"), Style::default().fg(Color::Cyan))
                     } else if e.is_symlink {
-                        ("LIEN", Style::default().fg(Color::Magenta))
+                        (
+                            t!("files.table.type_link"),
+                            Style::default().fg(Color::Magenta),
+                        )
                     } else {
-                        ("FICHIER", Style::default().fg(Color::Gray))
+                        (
+                            t!("files.table.type_file"),
+                            Style::default().fg(Color::Gray),
+                        )
                     };
 
                     let size_str = if e.is_dir {
@@ -1360,13 +1427,16 @@ fn draw_files_status(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
         ]));
     } else if let Some(entry) = state.selected_entry_owned() {
         lines.push(Line::from(vec![
-            Span::styled(" Chemin : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" {} : ", t!("files.status.path")),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(entry.path, Style::default().fg(Color::Cyan)),
             Span::styled(
                 if entry.is_dir {
-                    "  │  Entrée: ouvrir  │  Ctrl+D: télécharger le dossier"
+                    format!("  │  {}", t!("files.status.dir_hint"))
                 } else {
-                    "  │  Entrée: aperçu  │  Ctrl+D: télécharger"
+                    format!("  │  {}", t!("files.status.file_hint"))
                 },
                 Style::default().fg(Color::DarkGray),
             ),
@@ -1379,9 +1449,9 @@ fn draw_files_input(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
     let is_cmd = state.is_slash_mode();
     let border_color = if is_cmd { Color::Yellow } else { Color::Green };
     let title = if is_cmd {
-        " Commande SFTP "
+        format!(" {} ", t!("files.input.title_command"))
     } else {
-        " Filtre / Commande (/download, /upload, /mkdir, /rename, /del, /cd) "
+        format!(" {} ", t!("files.input.title"))
     };
 
     let content = if state.input.is_empty() {
@@ -1393,7 +1463,7 @@ fn draw_files_input(frame: &mut Frame, area: Rect, state: &FileExplorerState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Filtre un fichier ou tape /download, /upload, /mkdir...",
+                t!("files.input.placeholder"),
                 Style::default().fg(Color::DarkGray),
             ),
         ])
@@ -1448,12 +1518,12 @@ fn draw_file_slash_popup(frame: &mut Frame, input_area: Rect, state: &FileExplor
         .map(|c| {
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!(" {:<16}", c.usage),
+                    format!(" {:<18}", c.usage()),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(c.desc, Style::default().fg(Color::Gray)),
+                Span::styled(tr(c.desc_key), Style::default().fg(Color::Gray)),
             ]))
         })
         .collect();
@@ -1462,7 +1532,7 @@ fn draw_file_slash_popup(frame: &mut Frame, input_area: Rect, state: &FileExplor
         .block(
             Block::default()
                 .title(Span::styled(
-                    " Commandes fichiers (Tab: compléter, Entrée: exécuter) ",
+                    format!(" {} ", t!("files.popup.commands")),
                     Style::default().fg(Color::Yellow),
                 ))
                 .borders(Borders::ALL)
@@ -1480,21 +1550,31 @@ fn draw_file_slash_popup(frame: &mut Frame, input_area: Rect, state: &FileExplor
 }
 
 fn draw_files_footer(frame: &mut Frame, area: Rect) {
+    let key = |k: &'static str, c: Color| {
+        Span::styled(k, Style::default().fg(c).add_modifier(Modifier::BOLD))
+    };
+    let label = |l: std::borrow::Cow<'static, str>| {
+        Span::styled(format!(" {l}  "), Style::default().fg(Color::DarkGray))
+    };
     let hints = Line::from(vec![
-        Span::styled(" Entrée", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" Ouvrir/Voir  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+D", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" Télécharger  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+U", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" Envoyer  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+N", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" Nouveau dossier  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+E", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" Renommer  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+X", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        Span::styled(" Supprimer  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Esc", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Retour", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        key("Enter", Color::Green),
+        label(t!("files.footer.open")),
+        key("Ctrl+D", Color::Green),
+        label(t!("files.footer.download")),
+        key("Ctrl+U", Color::Green),
+        label(t!("files.footer.upload")),
+        key("Ctrl+N", Color::Green),
+        label(t!("files.footer.mkdir")),
+        key("Ctrl+E", Color::Green),
+        label(t!("files.footer.rename")),
+        key("Ctrl+X", Color::Red),
+        label(t!("files.footer.delete")),
+        key("Esc", Color::Cyan),
+        Span::styled(
+            format!(" {}", t!("files.footer.back")),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
     frame.render_widget(Paragraph::new(hints), area);
 }
@@ -1550,10 +1630,24 @@ fn draw_input_modal(
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled("  Entrée", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" Valider    ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Esc", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        Span::styled(" Annuler", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  Enter",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}    ", t!("files.modal.confirm")),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            "Esc",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}", t!("tui.form.hint_cancel")),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
 
     let p = Paragraph::new(lines)
@@ -1568,22 +1662,22 @@ fn draw_delete_modal(frame: &mut Frame, area: Rect, name: &str, is_dir: bool) {
 
     let block = Block::default()
         .title(Span::styled(
-            " Confirmer la suppression distante ",
+            format!(" {} ", t!("files.delete.title")),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
 
-    let kind = if is_dir {
-        "le dossier (et tout son contenu)"
+    let question = if is_dir {
+        t!("files.delete.question_dir")
     } else {
-        "le fichier"
+        t!("files.delete.question_file")
     };
 
     let lines = vec![
         Line::raw(""),
         Line::from(vec![
-            Span::raw(format!("Supprimer définitivement {kind} ")),
+            Span::raw(format!("{question} ")),
             Span::styled(
                 name,
                 Style::default()
@@ -1595,17 +1689,17 @@ fn draw_delete_modal(frame: &mut Frame, area: Rect, name: &str, is_dir: bool) {
         Line::raw(""),
         Line::from(vec![
             Span::styled(
-                "Entrée / o",
+                format!("Enter / {}", t!("tui.delete.yes_key")),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" : Supprimer    "),
+            Span::raw(format!(" : {}    ", t!("tui.delete.confirm"))),
             Span::styled(
                 "Esc / n",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" : Annuler"),
+            Span::raw(format!(" : {}", t!("tui.form.hint_cancel"))),
         ]),
     ];
 
@@ -1631,9 +1725,9 @@ fn draw_preview_modal(
     frame.render_widget(Clear, popup);
 
     let footer_hint = if truncated {
-        " Aperçu limité à 64 Ko — ↑↓: défiler, Esc: fermer "
+        format!(" {} ", t!("files.preview.hint_truncated"))
     } else {
-        " ↑↓ / PgUp / PgDn: défiler — Esc: fermer "
+        format!(" {} ", t!("files.preview.hint"))
     };
 
     let block = Block::default()
@@ -1644,8 +1738,11 @@ fn draw_preview_modal(
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(
-            Line::from(Span::styled(footer_hint, Style::default().fg(Color::DarkGray)))
-                .alignment(Alignment::Center),
+            Line::from(Span::styled(
+                footer_hint,
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Center),
         )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
@@ -1655,25 +1752,26 @@ fn draw_preview_modal(
         .enumerate()
         .map(|(i, l)| {
             Line::from(vec![
-                Span::styled(format!("{:>4} │ ", i + 1), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:>4} │ ", i + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(l.as_str(), Style::default().fg(Color::White)),
             ])
         })
         .collect();
 
-    let p = Paragraph::new(text_lines)
-        .scroll((scroll, 0))
-        .block(block);
+    let p = Paragraph::new(text_lines).scroll((scroll, 0)).block(block);
     frame.render_widget(p, popup);
 }
 
 fn draw_files_help_modal(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(72, 22, area);
+    let popup = centered_rect(84, 24, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
         .title(Span::styled(
-            " Aide — Gestionnaire de fichiers SFTP ",
+            format!(" {} ", t!("files.help.title")),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -1681,43 +1779,60 @@ fn draw_files_help_modal(frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
 
-    let lines = vec![
-        Line::raw(""),
+    let heading = |text: std::borrow::Cow<'static, str>| {
         Line::from(Span::styled(
-            "  Raccourcis clavier :",
+            format!("  {text}"),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("    ↑ / ↓            Naviguer dans les fichiers"),
-        Line::from("    Entrée           Ouvrir un dossier ou afficher l'aperçu d'un fichier"),
-        Line::from("    Backspace        Remonter au dossier parent (..)"),
-        Line::from("    Ctrl+D           Télécharger le fichier/dossier sur ce PC"),
-        Line::from("    Ctrl+U           Envoyer un fichier/dossier local vers ce PC distant"),
-        Line::from("    Ctrl+N           Créer un nouveau dossier distant"),
-        Line::from("    Ctrl+E / F2      Renommer le fichier/dossier sélectionné"),
-        Line::from("    Ctrl+X / Suppr   Supprimer sur le PC distant"),
-        Line::from("    Ctrl+H           Afficher / masquer les fichiers cachés"),
-        Line::from("    Ctrl+R / F5      Rafraîchir la liste"),
-        Line::from("    Esc / Ctrl+Q     Revenir au menu ssha"),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  Commandes directes depuis ton terminal :",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("    ssha files <nom>                 Ouvrir l'explorateur distant"),
-        Line::from("    ssha get <nom> <distant> [local] Télécharger un fichier/dossier"),
-        Line::from("    ssha put <nom> <local> [distant] Envoyer un fichier/dossier"),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  Appuie sur Esc ou Entrée pour fermer.",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+        ))
+    };
+    let row = |left: String, right: String| Line::from(format!("   {left:<22} {right}"));
 
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    let mut lines = vec![Line::raw(""), heading(t!("tui.help.section_keys"))];
+    for (keys, desc) in [
+        ("↑ / ↓", "files.help.navigate"),
+        ("Enter", "files.help.open"),
+        ("Backspace", "files.help.parent"),
+        ("Ctrl+D", "files.slash.download"),
+        ("Ctrl+U", "files.help.upload"),
+        ("Ctrl+N", "files.slash.mkdir"),
+        ("Ctrl+E / F2", "files.slash.rename"),
+        ("Ctrl+X / Del", "files.slash.del"),
+        ("Ctrl+H", "files.slash.hidden"),
+        ("Ctrl+R / F5", "files.slash.refresh"),
+        ("Esc / Ctrl+Q", "files.slash.quit"),
+    ] {
+        lines.push(row(keys.to_string(), tr(desc)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(heading(t!("tui.help.section_terminal")));
+    let name = tr("tui.arg.name");
+    for (cmd, desc) in [
+        (format!("ssha files <{name}>"), "cli.help.files.about"),
+        (
+            format!("ssha get <{name}> <remote> [local]"),
+            "cli.help.get.about",
+        ),
+        (
+            format!("ssha put <{name}> <local> [remote]"),
+            "cli.help.put.about",
+        ),
+    ] {
+        lines.push(row(cmd, tr(desc)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", t!("tui.help.close")),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 fn draw_upload_choice_modal(frame: &mut Frame, area: Rect, cwd: &str) {
@@ -1726,7 +1841,7 @@ fn draw_upload_choice_modal(frame: &mut Frame, area: Rect, cwd: &str) {
 
     let block = Block::default()
         .title(Span::styled(
-            format!(" Envoyer vers {cwd} "),
+            format!(" {} ", t!("files.upload.title", path = cwd)),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -1737,29 +1852,60 @@ fn draw_upload_choice_modal(frame: &mut Frame, area: Rect, cwd: &str) {
     let lines = vec![
         Line::raw(""),
         Line::from(Span::styled(
-            "  Que souhaites-tu envoyer vers la machine distante ?",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            format!("  {}", t!("files.upload_choice.question")),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("    [F] / Entrée  ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("Choisir un "),
-            Span::styled("fichier", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(" (fenêtre Windows / Linux)", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "    [1] F / Enter  ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                t!("files.upload_choice.file"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" ({})", t!("files.upload_choice.file_hint")),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("    [D]           ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("Choisir un "),
-            Span::styled("dossier entier", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(" (envoi récursif)", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "    [2] D          ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                t!("files.upload_choice.dir"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" ({})", t!("files.upload_choice.dir_hint")),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("    [S]           ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw("Saisir un chemin au clavier"),
+            Span::styled(
+                "    [3] S          ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(t!("files.upload_choice.manual")),
         ]),
         Line::raw(""),
         Line::from(Span::styled(
-            "    Esc : Annuler",
+            format!("    Esc : {}", t!("tui.form.hint_cancel")),
             Style::default().fg(Color::DarkGray),
         )),
     ];

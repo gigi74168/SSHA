@@ -1,9 +1,12 @@
+use crate::i18n::{self, tn, tr, Lang};
 use crate::models::{format_relative_time, AuthMethod, SshHost, VaultData};
+use crate::monitor::{self, MetricsState, MonitorManager};
 use crate::picker::{self, PickerResult};
 use crate::sftp::{default_download_dir, resolve_local_path};
 use crate::ssh::{probe_host, PingState};
 use crate::ssh_config;
 use crate::storage::{export_vault_to_file, import_vault_from_file, Storage};
+use crate::updater::{self, VersionNotes};
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -22,6 +25,7 @@ use ratatui::{Frame, Terminal};
 use std::collections::HashMap;
 use std::io;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub enum TuiAction {
@@ -34,76 +38,108 @@ pub enum TuiAction {
 #[derive(Clone, Copy)]
 struct SlashCommandDef {
     cmd: &'static str,
-    usage: &'static str,
-    desc: &'static str,
+    /// Translation key of the optional argument placeholder (e.g. `[name]`).
+    arg_key: Option<&'static str>,
+    /// Translation key of the description.
+    desc_key: &'static str,
+}
+
+impl SlashCommandDef {
+    fn usage(&self) -> String {
+        match self.arg_key {
+            Some(k) => format!("{} [{}]", self.cmd, tr(k)),
+            None => self.cmd.to_string(),
+        }
+    }
 }
 
 const SLASH_COMMANDS: &[SlashCommandDef] = &[
     SlashCommandDef {
         cmd: "/new",
-        usage: "/new",
-        desc: "Ajouter une nouvelle connexion SSH",
+        arg_key: None,
+        desc_key: "tui.slash.new",
     },
     SlashCommandDef {
         cmd: "/files",
-        usage: "/files [nom]",
-        desc: "Gérer et télécharger les fichiers à distance (SFTP)",
+        arg_key: Some("tui.arg.name"),
+        desc_key: "tui.slash.files",
     },
     SlashCommandDef {
         cmd: "/edit",
-        usage: "/edit [nom]",
-        desc: "Modifier la connexion sélectionnée",
+        arg_key: Some("tui.arg.name"),
+        desc_key: "tui.slash.edit",
     },
     SlashCommandDef {
         cmd: "/del",
-        usage: "/del [nom]",
-        desc: "Supprimer la connexion sélectionnée",
+        arg_key: Some("tui.arg.name"),
+        desc_key: "tui.slash.del",
     },
     SlashCommandDef {
         cmd: "/connect",
-        usage: "/connect [nom]",
-        desc: "Se connecter à la machine sélectionnée",
+        arg_key: Some("tui.arg.name"),
+        desc_key: "tui.slash.connect",
     },
     SlashCommandDef {
         cmd: "/test",
-        usage: "/test [nom]",
-        desc: "Tester la connexion réseau (ping TCP)",
+        arg_key: Some("tui.arg.name"),
+        desc_key: "tui.slash.test",
+    },
+    SlashCommandDef {
+        cmd: "/monitor",
+        arg_key: Some("tui.arg.name"),
+        desc_key: "tui.slash.monitor",
     },
     SlashCommandDef {
         cmd: "/refresh",
-        usage: "/refresh",
-        desc: "Actualiser le statut UP/DOWN de toutes les machines",
+        arg_key: None,
+        desc_key: "tui.slash.refresh",
     },
     SlashCommandDef {
         cmd: "/export",
-        usage: "/export [fichier]",
-        desc: "Exporter toutes les connexions (IP, users, mots de passe)",
+        arg_key: Some("tui.arg.file"),
+        desc_key: "tui.slash.export",
     },
     SlashCommandDef {
         cmd: "/import",
-        usage: "/import [fichier]",
-        desc: "Importer une configuration depuis un autre ssha",
+        arg_key: Some("tui.arg.file"),
+        desc_key: "tui.slash.import",
     },
     SlashCommandDef {
         cmd: "/import-ssh",
-        usage: "/import-ssh [chemin]",
-        desc: "Importer les machines depuis ~/.ssh/config (OpenSSH)",
+        arg_key: Some("tui.arg.path"),
+        desc_key: "tui.slash.import_ssh",
+    },
+    SlashCommandDef {
+        cmd: "/lang",
+        arg_key: Some("tui.arg.code"),
+        desc_key: "tui.slash.lang",
+    },
+    SlashCommandDef {
+        cmd: "/changelog",
+        arg_key: None,
+        desc_key: "tui.slash.changelog",
     },
     SlashCommandDef {
         cmd: "/clear",
-        usage: "/clear",
-        desc: "Effacer la barre de recherche",
+        arg_key: None,
+        desc_key: "tui.slash.clear",
     },
     SlashCommandDef {
         cmd: "/help",
-        usage: "/help",
-        desc: "Afficher l'aide et les raccourcis",
+        arg_key: None,
+        desc_key: "tui.slash.help",
     },
     SlashCommandDef {
         cmd: "/quit",
-        usage: "/quit",
-        desc: "Quitter ssha",
+        arg_key: None,
+        desc_key: "tui.slash.quit",
     },
+];
+
+/// Slash commands whose argument is a machine name (autocompletion of names).
+const HOST_ARG_COMMANDS: &[&str] = &[
+    "/connect", "/c", "/open", "/files", "/sftp", "/f", "/edit", "/e", "/del", "/delete", "/rm",
+    "/remove", "/test", "/ping", "/monitor", "/mon", "/m",
 ];
 
 #[derive(Clone)]
@@ -121,9 +157,21 @@ struct StatusMessage {
 
 enum Modal {
     None,
-    Form(HostForm),
-    ConfirmDelete { host_name: String, endpoint: String },
-    Help,
+    Form(Box<HostForm>),
+    ConfirmDelete {
+        host_name: String,
+        endpoint: String,
+    },
+    Help {
+        scroll: u16,
+    },
+    LangPicker {
+        selected: usize,
+    },
+    WhatsNew {
+        notes: Vec<VersionNotes>,
+        scroll: u16,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -142,6 +190,7 @@ enum FormField {
     Password,
     KeyPath,
     KeyPassphrase,
+    Monitor,
     Group,
     Note,
 }
@@ -158,6 +207,7 @@ struct HostForm {
     key_passphrase: String,
     group: String,
     note: String,
+    monitor: bool,
     focused_index: usize,
     show_secret: bool,
     error: Option<String>,
@@ -177,6 +227,7 @@ impl HostForm {
             key_passphrase: String::new(),
             group: String::new(),
             note: String::new(),
+            monitor: false,
             focused_index: 0,
             show_secret: false,
             error: None,
@@ -211,6 +262,7 @@ impl HostForm {
             key_passphrase,
             group: h.group.clone().unwrap_or_default(),
             note: h.note.clone().unwrap_or_default(),
+            monitor: h.monitor,
             focused_index: 0,
             show_secret: false,
             error: None,
@@ -226,6 +278,7 @@ impl HostForm {
                 FormField::Username,
                 FormField::AuthKind,
                 FormField::Password,
+                FormField::Monitor,
                 FormField::Group,
                 FormField::Note,
             ],
@@ -237,6 +290,7 @@ impl HostForm {
                 FormField::AuthKind,
                 FormField::KeyPath,
                 FormField::KeyPassphrase,
+                FormField::Monitor,
                 FormField::Group,
                 FormField::Note,
             ],
@@ -254,7 +308,7 @@ impl HostForm {
             FormField::Host => Some(&mut self.host),
             FormField::Port => Some(&mut self.port),
             FormField::Username => Some(&mut self.username),
-            FormField::AuthKind => None,
+            FormField::AuthKind | FormField::Monitor => None,
             FormField::Password => Some(&mut self.password),
             FormField::KeyPath => Some(&mut self.key_path),
             FormField::KeyPassphrase => Some(&mut self.key_passphrase),
@@ -287,10 +341,10 @@ impl HostForm {
     fn build_host(&self, vault: &VaultData) -> Result<SshHost, String> {
         let name = self.name.trim().to_string();
         if name.is_empty() {
-            return Err("Le nom / alias est obligatoire (ex: mon-pc).".to_string());
+            return Err(t!("tui.form.err.name_required").into_owned());
         }
         if name.starts_with('/') {
-            return Err("Le nom ne peut pas commencer par '/'.".to_string());
+            return Err(t!("common.err.name_slash").into_owned());
         }
 
         // Check duplicate name unless editing the same entry
@@ -301,13 +355,13 @@ impl HostForm {
                 .map(|orig| orig.eq_ignore_ascii_case(&existing.name))
                 .unwrap_or(false);
             if !is_same {
-                return Err(format!("Une connexion nommée '{}' existe déjà.", name));
+                return Err(t!("common.err.name_exists", name = name).into_owned());
             }
         }
 
         let host = self.host.trim().to_string();
         if host.is_empty() {
-            return Err("L'adresse IP ou le nom d'hôte est obligatoire (ex: 192.168.1.192).".to_string());
+            return Err(t!("tui.form.err.host_required").into_owned());
         }
 
         let port_str = self.port.trim();
@@ -318,18 +372,18 @@ impl HostForm {
                 .parse::<u16>()
                 .ok()
                 .filter(|&p| p > 0)
-                .ok_or_else(|| "Le port doit être un nombre entre 1 et 65535.".to_string())?
+                .ok_or_else(|| t!("tui.form.err.port").into_owned())?
         };
 
         let username = self.username.trim().to_string();
         if username.is_empty() {
-            return Err("Le nom d'utilisateur SSH est obligatoire.".to_string());
+            return Err(t!("tui.form.err.user_required").into_owned());
         }
 
         let auth = match self.auth_kind {
             FormAuthKind::Password => {
                 if self.password.is_empty() {
-                    return Err("Le mot de passe SSH est obligatoire (ou choisis Clé SSH).".to_string());
+                    return Err(t!("tui.form.err.password_required").into_owned());
                 }
                 AuthMethod::Password {
                     password: self.password.clone(),
@@ -338,7 +392,7 @@ impl HostForm {
             FormAuthKind::Key => {
                 let path = self.key_path.trim().to_string();
                 if path.is_empty() {
-                    return Err("Le chemin vers la clé privée SSH est obligatoire.".to_string());
+                    return Err(t!("tui.form.err.key_required").into_owned());
                 }
                 let passphrase = if self.key_passphrase.is_empty() {
                     None
@@ -373,6 +427,7 @@ impl HostForm {
                 .map(|e| e.extra_keys.clone())
                 .unwrap_or_default(),
             forward_agent: existing_meta.map(|e| e.forward_agent).unwrap_or(false),
+            monitor: self.monitor,
             created_at: existing_meta.map(|e| e.created_at).unwrap_or_else(Utc::now),
             last_used: existing_meta.and_then(|e| e.last_used),
         })
@@ -407,6 +462,9 @@ struct AppState {
     ping_tx: Option<mpsc::Sender<(String, PingState)>>,
     ping_rx: Option<mpsc::Receiver<(String, PingState)>>,
     last_ping_all: Instant,
+    metrics: HashMap<String, MetricsState>,
+    metrics_rx: Option<mpsc::Receiver<(String, MetricsState)>>,
+    monitor: Option<MonitorManager>,
 }
 
 impl AppState {
@@ -430,7 +488,85 @@ impl AppState {
             ping_tx: None,
             ping_rx: None,
             last_ping_all: Instant::now(),
+            metrics: HashMap::new(),
+            metrics_rx: None,
+            monitor: None,
         }
+    }
+
+    /// Starts live CPU/RAM monitoring of the machines that have it enabled.
+    fn enable_monitoring(&mut self, storage: Arc<Storage>) {
+        if monitor::globally_disabled() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.metrics_rx = Some(rx);
+        self.monitor = Some(MonitorManager::new(storage, tx));
+        self.sync_monitoring();
+    }
+
+    /// Restarts / stops monitoring tasks after the machine list changed.
+    fn sync_monitoring(&mut self) {
+        if let Some(manager) = self.monitor.as_mut() {
+            manager.sync(&self.vault.hosts);
+            let monitored: Vec<String> = self
+                .vault
+                .hosts
+                .iter()
+                .filter(|h| h.monitor)
+                .map(|h| h.name.clone())
+                .collect();
+            self.metrics.retain(|name, _| monitored.contains(name));
+        }
+    }
+
+    fn poll_metrics(&mut self) {
+        if let Some(ref rx) = self.metrics_rx {
+            while let Ok((name, state)) = rx.try_recv() {
+                let still_monitored = self
+                    .monitor
+                    .as_ref()
+                    .map(|m| m.is_running(&name))
+                    .unwrap_or(false);
+                if still_monitored {
+                    self.metrics.insert(name, state);
+                }
+            }
+        }
+    }
+
+    /// Toggles CPU/RAM monitoring of a machine and saves the vault.
+    fn toggle_monitor(&mut self, name: &str, storage: &Storage) -> Result<()> {
+        let Some(idx) = self.vault.find_index_by_name(name) else {
+            self.set_status(StatusLevel::Error, t!("tui.status.not_found"));
+            return Ok(());
+        };
+        let enabled = !self.vault.hosts[idx].monitor;
+        self.vault.hosts[idx].monitor = enabled;
+        let host_name = self.vault.hosts[idx].name.clone();
+        storage.save_vault(&self.vault)?;
+        self.sync_monitoring();
+        if enabled {
+            let note = if monitor::globally_disabled() {
+                format!(" {}", t!("tui.status.monitor_env_off"))
+            } else {
+                String::new()
+            };
+            self.set_status(
+                StatusLevel::Success,
+                format!("{}{note}", t!("tui.status.monitor_on", name = host_name)),
+            );
+        } else {
+            self.set_status(
+                StatusLevel::Info,
+                t!("tui.status.monitor_off", name = host_name),
+            );
+        }
+        Ok(())
+    }
+
+    fn metrics_for(&self, name: &str) -> Option<&MetricsState> {
+        self.metrics.get(name)
     }
 
     fn enable_live_ping(&mut self) {
@@ -517,11 +653,7 @@ impl AppState {
         let idx = self.input.find(' ')?;
         let cmd = &self.input[..idx];
         let query = self.input[idx + 1..].trim_start();
-        let takes_host = matches!(
-            cmd.to_lowercase().as_str(),
-            "/connect" | "/c" | "/open" | "/files" | "/sftp" | "/f" | "/edit" | "/e" | "/del"
-                | "/delete" | "/rm" | "/remove" | "/test" | "/ping"
-        );
+        let takes_host = HOST_ARG_COMMANDS.contains(&cmd.to_lowercase().as_str());
         if takes_host {
             Some((cmd, query))
         } else {
@@ -653,18 +785,25 @@ impl Drop for TuiGuard {
 /// Runs the interactive 100% CLI interface until the user picks a host to connect,
 /// asks to test a host, or exits.
 pub fn run_tui(
-    storage: &Storage,
+    storage: &Arc<Storage>,
     initial_status: Option<(bool, String)>,
+    whats_new: Option<Vec<VersionNotes>>,
 ) -> Result<TuiAction> {
     let vault = storage.load_vault()?;
     let mut app = AppState::new(vault, initial_status);
     app.enable_live_ping();
+    app.enable_monitoring(Arc::clone(storage));
+    if let Some(notes) = whats_new {
+        app.modal = Modal::WhatsNew { notes, scroll: 0 };
+    }
+    let storage: &Storage = storage;
 
     let mut terminal = TuiGuard::enter()?;
     let _guard = TuiGuard;
 
     loop {
         app.poll_ping_results();
+        app.poll_metrics();
         app.clamp_selection();
         terminal.draw(|frame| draw_ui(frame, &app))?;
 
@@ -687,11 +826,7 @@ pub fn run_tui(
     }
 }
 
-fn handle_key(
-    app: &mut AppState,
-    key: KeyEvent,
-    storage: &Storage,
-) -> Result<Option<TuiAction>> {
+fn handle_key(app: &mut AppState, key: KeyEvent, storage: &Storage) -> Result<Option<TuiAction>> {
     match &mut app.modal {
         Modal::None => handle_main_key(app, key, storage),
         Modal::Form(_) => {
@@ -702,7 +837,14 @@ fn handle_key(
             handle_delete_confirm_key(app, key, storage)?;
             Ok(None)
         }
-        Modal::Help => {
+        Modal::Help { scroll } => {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                KeyCode::PageDown | KeyCode::Char(' ') => *scroll = scroll.saturating_add(10),
+                _ => {}
+            }
             if matches!(
                 key.code,
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::F(1)
@@ -713,6 +855,48 @@ fn handle_key(
             }
             Ok(None)
         }
+        Modal::LangPicker { selected } => {
+            if let Some(choice) = i18n::handle_lang_picker_key(selected, key.code, key.modifiers) {
+                app.modal = Modal::None;
+                if let Some(lang) = choice {
+                    apply_language(app, storage, lang);
+                }
+            }
+            Ok(None)
+        }
+        Modal::WhatsNew { scroll, .. } => {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                KeyCode::PageDown | KeyCode::Char(' ') => *scroll = scroll.saturating_add(10),
+                KeyCode::Home => *scroll = 0,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => app.modal = Modal::None,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.modal = Modal::None
+                }
+                _ => {}
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Saves and applies a new interface language (from `/lang`).
+fn apply_language(app: &mut AppState, storage: &Storage, lang: Lang) {
+    i18n::set_lang(lang);
+    let mut settings = storage.load_settings();
+    settings.language = Some(lang.code().to_string());
+    match storage.save_settings(&settings) {
+        Ok(()) => {
+            let mut text = t!("lang.changed", lang = lang.native_name()).into_owned();
+            if i18n::env_override().is_some() {
+                text.push(' ');
+                text.push_str(&t!("cli.lang.env_override"));
+            }
+            app.set_status(StatusLevel::Success, text);
+        }
+        Err(e) => app.set_status(StatusLevel::Error, format!("{e:#}")),
     }
 }
 
@@ -728,14 +912,14 @@ fn handle_main_key(
         match key.code {
             KeyCode::Char('c') | KeyCode::Char('q') => return Ok(Some(TuiAction::Quit)),
             KeyCode::Char('n') => {
-                app.modal = Modal::Form(HostForm::new_empty());
+                app.modal = Modal::Form(Box::new(HostForm::new_empty()));
                 return Ok(None);
             }
             KeyCode::Char('e') => {
                 if let Some(host) = app.selected_host() {
-                    app.modal = Modal::Form(HostForm::from_host(&host));
+                    app.modal = Modal::Form(Box::new(HostForm::from_host(&host)));
                 } else {
-                    app.set_status(StatusLevel::Info, "Aucune connexion sélectionnée à modifier.");
+                    app.set_status(StatusLevel::Info, t!("tui.status.none_selected"));
                 }
                 return Ok(None);
             }
@@ -746,7 +930,7 @@ fn handle_main_key(
                         endpoint: host.endpoint_display(),
                     };
                 } else {
-                    app.set_status(StatusLevel::Info, "Aucune connexion sélectionnée à supprimer.");
+                    app.set_status(StatusLevel::Info, t!("tui.status.none_selected"));
                 }
                 return Ok(None);
             }
@@ -754,7 +938,7 @@ fn handle_main_key(
                 if let Some(host) = app.selected_host() {
                     return Ok(Some(TuiAction::TestHost(host)));
                 } else {
-                    app.set_status(StatusLevel::Info, "Aucune connexion sélectionnée à tester.");
+                    app.set_status(StatusLevel::Info, t!("tui.status.none_selected"));
                 }
                 return Ok(None);
             }
@@ -762,17 +946,25 @@ fn handle_main_key(
                 if let Some(host) = app.selected_host() {
                     return Ok(Some(TuiAction::BrowseFiles(host)));
                 } else {
-                    app.set_status(StatusLevel::Info, "Aucune connexion sélectionnée pour les fichiers.");
+                    app.set_status(StatusLevel::Info, t!("tui.status.none_selected"));
                 }
                 return Ok(None);
             }
             KeyCode::Char('h') => {
-                app.modal = Modal::Help;
+                app.modal = Modal::Help { scroll: 0 };
+                return Ok(None);
+            }
+            KeyCode::Char('p') => {
+                if let Some(host) = app.selected_host() {
+                    app.toggle_monitor(&host.name, storage)?;
+                } else {
+                    app.set_status(StatusLevel::Info, t!("tui.status.none_selected"));
+                }
                 return Ok(None);
             }
             KeyCode::Char('r') => {
                 app.trigger_ping_all(true);
-                app.set_status(StatusLevel::Info, "Vérification UP/DOWN de toutes les machines...");
+                app.set_status(StatusLevel::Info, t!("tui.status.refreshing"));
                 return Ok(None);
             }
             KeyCode::Char('u') => {
@@ -785,14 +977,14 @@ fn handle_main_key(
 
     match key.code {
         KeyCode::F(1) => {
-            app.modal = Modal::Help;
+            app.modal = Modal::Help { scroll: 0 };
         }
         KeyCode::F(2) => {
-            app.modal = Modal::Form(HostForm::new_empty());
+            app.modal = Modal::Form(Box::new(HostForm::new_empty()));
         }
         KeyCode::F(5) => {
             app.trigger_ping_all(true);
-            app.set_status(StatusLevel::Info, "Vérification UP/DOWN de toutes les machines...");
+            app.set_status(StatusLevel::Info, t!("tui.status.refreshing"));
         }
         KeyCode::Esc => {
             if !app.input.is_empty() {
@@ -853,11 +1045,7 @@ fn handle_main_key(
             } else if app.is_slash_mode() {
                 let cmds = app.filtered_slash_commands();
                 if let Some(cmd) = cmds.get(app.slash_selected) {
-                    let takes_host = matches!(
-                        cmd.cmd,
-                        "/files" | "/edit" | "/del" | "/connect" | "/test"
-                    );
-                    app.input = if takes_host {
+                    app.input = if cmd.arg_key.is_some() {
                         format!("{} ", cmd.cmd)
                     } else {
                         cmd.cmd.to_string()
@@ -883,10 +1071,7 @@ fn handle_main_key(
             } else if let Some(host) = app.selected_host() {
                 return Ok(Some(TuiAction::Connect(host)));
             } else {
-                app.set_status(
-                    StatusLevel::Info,
-                    "Aucune machine trouvée. Tape /new pour en ajouter une.",
-                );
+                app.set_status(StatusLevel::Info, t!("tui.status.no_machine"));
             }
         }
         KeyCode::Char(c) => {
@@ -916,10 +1101,13 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
         "/del" | "/delete" | "/rm" | "/remove" => "/del",
         "/connect" | "/c" | "/open" => "/connect",
         "/test" | "/ping" => "/test",
+        "/monitor" | "/mon" | "/m" => "/monitor",
         "/refresh" | "/r" => "/refresh",
         "/export" | "/backup" => "/export",
         "/import" | "/restore" => "/import",
         "/import-ssh" | "/ssh-config" => "/import-ssh",
+        "/lang" | "/language" | "/langue" => "/lang",
+        "/changelog" | "/whatsnew" | "/news" => "/changelog",
         "/clear" => "/clear",
         "/help" | "/?" => "/help",
         "/quit" | "/exit" | "/q" => "/quit",
@@ -930,7 +1118,7 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
             } else {
                 app.set_status(
                     StatusLevel::Error,
-                    format!("Commande inconnue '{}'. Tape /help pour voir la liste.", typed_cmd),
+                    t!("tui.status.unknown_command", cmd = typed_cmd),
                 );
                 return Ok(None);
             }
@@ -944,14 +1132,14 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
         "/new" => {
             let mut form = HostForm::new_empty();
             if let Some(a) = arg {
-                // Allow quick `/new 192.168.1.192` or `/new mon-pc`
+                // Allow quick `/new 192.168.1.192` or `/new my-pc`
                 if a.contains('.') || a.contains(':') {
                     form.host = a.to_string();
                 } else {
                     form.name = a.to_string();
                 }
             }
-            app.modal = Modal::Form(form);
+            app.modal = Modal::Form(Box::new(form));
         }
         "/files" => {
             let target = match arg {
@@ -961,7 +1149,7 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
             if let Some(host) = target {
                 return Ok(Some(TuiAction::BrowseFiles(host)));
             } else {
-                app.set_status(StatusLevel::Error, "Connexion introuvable pour /files.");
+                app.set_status(StatusLevel::Error, t!("tui.status.not_found"));
             }
         }
         "/edit" => {
@@ -970,9 +1158,9 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
                 None => app.selected_host(),
             };
             if let Some(host) = target {
-                app.modal = Modal::Form(HostForm::from_host(&host));
+                app.modal = Modal::Form(Box::new(HostForm::from_host(&host)));
             } else {
-                app.set_status(StatusLevel::Error, "Connexion introuvable pour /edit.");
+                app.set_status(StatusLevel::Error, t!("tui.status.not_found"));
             }
         }
         "/del" => {
@@ -986,7 +1174,7 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
                     endpoint: host.endpoint_display(),
                 };
             } else {
-                app.set_status(StatusLevel::Error, "Connexion introuvable pour /del.");
+                app.set_status(StatusLevel::Error, t!("tui.status.not_found"));
             }
         }
         "/connect" => {
@@ -997,7 +1185,7 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
             if let Some(host) = target {
                 return Ok(Some(TuiAction::Connect(host)));
             } else {
-                app.set_status(StatusLevel::Error, "Connexion introuvable.");
+                app.set_status(StatusLevel::Error, t!("tui.status.not_found"));
             }
         }
         "/test" => {
@@ -1008,36 +1196,84 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
             if let Some(host) = target {
                 return Ok(Some(TuiAction::TestHost(host)));
             } else {
-                app.set_status(StatusLevel::Error, "Aucune connexion à tester.");
+                app.set_status(StatusLevel::Error, t!("tui.status.not_found"));
+            }
+        }
+        "/monitor" => {
+            let target = match arg {
+                Some(name) => app.vault.find_by_name(name).cloned(),
+                None => app.selected_host(),
+            };
+            if let Some(host) = target {
+                app.toggle_monitor(&host.name, storage)?;
+            } else {
+                app.set_status(StatusLevel::Error, t!("tui.status.not_found"));
             }
         }
         "/refresh" => {
             app.trigger_ping_all(true);
-            app.set_status(StatusLevel::Info, "Vérification UP/DOWN de toutes les machines...");
+            app.set_status(StatusLevel::Info, t!("tui.status.refreshing"));
+        }
+        "/lang" => match arg {
+            Some(code) => match Lang::from_code(code) {
+                Some(lang) => apply_language(app, storage, lang),
+                None => app.set_status(
+                    StatusLevel::Error,
+                    t!(
+                        "cli.lang.unknown",
+                        code = code,
+                        list = Lang::ALL
+                            .iter()
+                            .map(|l| l.code())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ),
+            },
+            None => {
+                app.modal = Modal::LangPicker {
+                    selected: i18n::current_lang().index(),
+                };
+            }
+        },
+        "/changelog" => {
+            app.modal = Modal::WhatsNew {
+                notes: updater::recent_notes(5),
+                scroll: 0,
+            };
         }
         "/export" => {
             let dest = match arg {
                 Some(p) => Some(resolve_local_path(p)),
                 None => match picker::pick_save_file(
-                    "Exporter la configuration ssha",
+                    &t!("common.export_title"),
                     "ssha-config.json",
-                    Some(("Configuration ssha (*.json)", "*.json")),
+                    Some((&t!("common.json_filter"), "*.json")),
                 ) {
                     PickerResult::Selected(p) => Some(p),
                     PickerResult::Cancelled => {
-                        app.set_status(StatusLevel::Info, "Export annulé.");
+                        app.set_status(StatusLevel::Info, t!("common.export_cancelled"));
                         None
                     }
-                    PickerResult::Unavailable => Some(default_download_dir().join("ssha-config.json")),
+                    PickerResult::Unavailable => {
+                        Some(default_download_dir().join("ssha-config.json"))
+                    }
                 },
             };
             if let Some(path) = dest {
                 match export_vault_to_file(&app.vault, &path) {
                     Ok(count) => app.set_status(
                         StatusLevel::Success,
-                        format!("{count} connexion(s) exportée(s) → {}", path.display()),
+                        tn(
+                            "common.exported",
+                            count as u64,
+                            &[("path", &path.display().to_string())],
+                        ),
                     ),
-                    Err(e) => app.set_status(StatusLevel::Error, format!("Échec export : {e:#}")),
+                    Err(e) => app.set_status(
+                        StatusLevel::Error,
+                        t!("tui.status.export_failed", error = format!("{e:#}")),
+                    ),
                 }
             }
         }
@@ -1045,19 +1281,16 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
             let src = match arg {
                 Some(p) => Some(resolve_local_path(p)),
                 None => match picker::pick_file(
-                    "Importer une configuration ssha",
-                    Some(("Configuration ssha (*.json)", "*.json")),
+                    &t!("common.import_title"),
+                    Some((&t!("common.json_filter"), "*.json")),
                 ) {
                     PickerResult::Selected(p) => Some(p),
                     PickerResult::Cancelled => {
-                        app.set_status(StatusLevel::Info, "Import annulé.");
+                        app.set_status(StatusLevel::Info, t!("common.import_cancelled"));
                         None
                     }
                     PickerResult::Unavailable => {
-                        app.set_status(
-                            StatusLevel::Info,
-                            "Tape `/import <chemin_du_fichier.json>` pour importer sans interface graphique.",
-                        );
+                        app.set_status(StatusLevel::Info, t!("tui.status.import_hint"));
                         None
                     }
                 },
@@ -1068,16 +1301,24 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
                         if let Ok(reloaded) = storage.load_vault() {
                             app.vault = reloaded;
                             app.trigger_ping_all(true);
+                            app.sync_monitoring();
                         }
                         app.set_status(
                             StatusLevel::Success,
-                            format!(
-                                "Import terminé : {} ajoutée(s), {} mise(s) à jour.",
-                                report.added, report.updated
+                            t!(
+                                "tui.status.import_done",
+                                report = crate::cli::import_report_text(
+                                    report.added,
+                                    report.updated,
+                                    report.skipped
+                                )
                             ),
                         );
                     }
-                    Err(e) => app.set_status(StatusLevel::Error, format!("Échec import : {e:#}")),
+                    Err(e) => app.set_status(
+                        StatusLevel::Error,
+                        t!("tui.status.import_failed", error = format!("{e:#}")),
+                    ),
                 }
             }
         }
@@ -1092,26 +1333,31 @@ fn execute_slash_command(app: &mut AppState, storage: &Storage) -> Result<Option
                         if let Ok(reloaded) = storage.load_vault() {
                             app.vault = reloaded;
                             app.trigger_ping_all(true);
+                            app.sync_monitoring();
                         }
                         app.set_status(
                             StatusLevel::Success,
-                            format!(
-                                "Import ~/.ssh/config : {} ajoutée(s), {} ignorée(s).",
-                                report.added, report.skipped
+                            t!(
+                                "tui.status.import_ssh_done",
+                                report = crate::cli::import_report_text(
+                                    report.added,
+                                    report.updated,
+                                    report.skipped
+                                )
                             ),
                         );
                     }
                     Err(e) => app.set_status(StatusLevel::Error, format!("{e:#}")),
                 }
             } else {
-                app.set_status(StatusLevel::Error, "Impossible de localiser ~/.ssh/config.");
+                app.set_status(StatusLevel::Error, t!("common.err.no_ssh_config"));
             }
         }
         "/clear" => {
             app.status = None;
         }
         "/help" => {
-            app.modal = Modal::Help;
+            app.modal = Modal::Help { scroll: 0 };
         }
         "/quit" => {
             return Ok(Some(TuiAction::Quit));
@@ -1164,6 +1410,9 @@ fn handle_form_key(app: &mut AppState, key: KeyEvent, storage: &Storage) -> Resu
             }
             KeyCode::Char(' ') if field == FormField::AuthKind => {
                 form.toggle_auth_kind();
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if field == FormField::Monitor => {
+                form.monitor = !form.monitor;
             }
             KeyCode::Backspace => {
                 if let Some(buf) = form.active_buffer_mut() {
@@ -1218,16 +1467,14 @@ fn try_submit_form(app: &mut AppState, storage: &Storage) -> Result<()> {
 
             storage.save_vault(&app.vault)?;
             app.trigger_ping_one(&host_to_ping);
+            app.sync_monitoring();
             app.modal = Modal::None;
             app.set_status(
                 StatusLevel::Success,
                 if was_edit {
-                    format!("Connexion '{}' mise à jour et chiffrée.", saved_name)
+                    t!("tui.status.updated", name = saved_name)
                 } else {
-                    format!(
-                        "Connexion '{}' ajoutée et chiffrée. Appuie sur Entrée pour te connecter !",
-                        saved_name
-                    )
+                    t!("tui.status.added", name = saved_name)
                 },
             );
         }
@@ -1245,18 +1492,17 @@ fn handle_delete_confirm_key(app: &mut AppState, key: KeyEvent, storage: &Storag
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.modal = Modal::None;
         }
-        KeyCode::Enter | KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('y') | KeyCode::Char('Y') => {
+        KeyCode::Char(c) if !i18n::is_yes(&c.to_string()) => {}
+        KeyCode::Enter | KeyCode::Char(_) => {
             let host_name = match &app.modal {
                 Modal::ConfirmDelete { host_name, .. } => host_name.clone(),
                 _ => return Ok(()),
             };
             app.vault.remove_by_name(&host_name);
             storage.save_vault(&app.vault)?;
+            app.sync_monitoring();
             app.modal = Modal::None;
-            app.set_status(
-                StatusLevel::Success,
-                format!("Connexion '{}' supprimée.", host_name),
-            );
+            app.set_status(StatusLevel::Success, t!("cli.rm.done", name = host_name));
         }
         _ => {}
     }
@@ -1295,20 +1541,22 @@ fn draw_ui(frame: &mut Frame, app: &AppState) {
     match &app.modal {
         Modal::None => {}
         Modal::Form(form) => draw_form_modal(frame, area, form),
-        Modal::ConfirmDelete { host_name, endpoint } => {
-            draw_delete_modal(frame, area, host_name, endpoint)
+        Modal::ConfirmDelete {
+            host_name,
+            endpoint,
+        } => draw_delete_modal(frame, area, host_name, endpoint),
+        Modal::Help { scroll } => draw_help_modal(frame, area, *scroll),
+        Modal::LangPicker { selected } => {
+            i18n::draw_lang_picker(frame, area, *selected, i18n::detect_system_lang())
         }
-        Modal::Help => draw_help_modal(frame, area),
+        Modal::WhatsNew { notes, scroll } => draw_whats_new_modal(frame, area, notes, *scroll),
     }
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &AppState) {
     let count = app.vault.hosts.len();
-    let label = if count <= 1 {
-        format!("{count} connexion")
-    } else {
-        format!("{count} connexions")
-    };
+    let label = tn("tui.header.connections", count as u64, &[]);
+    let monitored = app.vault.hosts.iter().filter(|h| h.monitor).count();
 
     let title = Line::from(vec![
         Span::styled(
@@ -1318,11 +1566,20 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &AppState) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  Gestionnaire SSH 100% CLI  "),
+        Span::raw(format!("  {}  ", t!("tui.header.subtitle"))),
         Span::styled("│", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("  {label}  "), Style::default().fg(Color::White)),
         Span::styled("│", Style::default().fg(Color::DarkGray)),
-        Span::styled("  AES-256-GCM auto", Style::default().fg(Color::Green)),
+        Span::styled("  AES-256-GCM auto  ", Style::default().fg(Color::Green)),
+        Span::styled("│", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("  📊 {}", tn("tui.header.monitored", monitored as u64, &[])),
+            Style::default().fg(if monitored > 0 {
+                Color::Magenta
+            } else {
+                Color::DarkGray
+            }),
+        ),
     ]);
 
     let block = Block::default()
@@ -1338,7 +1595,7 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let block = Block::default()
         .title(Span::styled(
-            " Connexions SSH enregistrées ",
+            format!(" {} ", t!("tui.table.title")),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1350,33 +1607,15 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
         let empty = Paragraph::new(vec![
             Line::raw(""),
             Line::from(Span::styled(
-                "Aucune connexion SSH enregistrée pour le moment.",
+                t!("tui.table.empty"),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::raw(""),
-            Line::from(vec![
-                Span::raw("Tape "),
-                Span::styled(
-                    "/new",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" puis "),
-                Span::styled("Entrée", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" (ou "),
-                Span::styled(
-                    "Ctrl+N",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(") pour enregistrer ta première machine"),
-            ]),
+            Line::from(Span::raw(t!("tui.table.empty_hint"))),
             Line::from(Span::styled(
-                "(ex: 192.168.1.192 avec son mot de passe SSH).",
+                t!("tui.table.empty_example"),
                 Style::default().fg(Color::DarkGray),
             )),
         ])
@@ -1390,11 +1629,11 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
         let no_match = Paragraph::new(vec![
             Line::raw(""),
             Line::from(Span::styled(
-                format!("Aucun résultat pour « {} ».", app.input),
+                t!("tui.table.no_match", query = app.input),
                 Style::default().fg(Color::Yellow),
             )),
             Line::from(Span::styled(
-                "Appuie sur Esc pour réinitialiser le filtre, ou tape /new pour ajouter une machine.",
+                t!("tui.table.no_match_hint"),
                 Style::default().fg(Color::DarkGray),
             )),
         ])
@@ -1404,14 +1643,24 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    let header = Row::new(vec![
-        Cell::from("  Nom"),
-        Cell::from("Adresse"),
-        Cell::from("Auth"),
-        Cell::from("Groupe"),
-        Cell::from("Dernière connexion"),
-        Cell::from(Line::from("État").alignment(Alignment::Right)),
-    ])
+    // Narrow terminals (e.g. 80 columns): hide the Group and Last used columns
+    // so that the live CPU/RAM column stays readable.
+    let compact = area.width < 118;
+
+    let mut header_cells = vec![
+        Cell::from(format!("  {}", t!("cli.list.col_name"))),
+        Cell::from(t!("cli.list.col_address")),
+        Cell::from(t!("tui.table.col_resources")),
+        Cell::from(t!("cli.list.col_auth")),
+    ];
+    if !compact {
+        header_cells.push(Cell::from(t!("cli.list.col_group")));
+        header_cells.push(Cell::from(t!("cli.list.col_last_used")));
+    }
+    header_cells.push(Cell::from(
+        Line::from(t!("cli.list.col_state")).alignment(Alignment::Right),
+    ));
+    let header = Row::new(header_cells)
     .style(
         Style::default()
             .fg(Color::DarkGray)
@@ -1443,9 +1692,7 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
                 ),
                 PingState::Down => (
                     "DOWN",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     Style::default().fg(Color::Red),
                 ),
                 PingState::Checking => (
@@ -1464,7 +1711,9 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
             let dot_cell =
                 Cell::from(Line::from(Span::styled("● ", dot_style)).alignment(Alignment::Right));
 
-            Row::new(vec![
+            let resources_cell = Cell::from(resources_line(app, h, ping));
+
+            let mut cells = vec![
                 Cell::from(format!("{prefix}{}", h.name)).style(if selected {
                     Style::default()
                         .fg(Color::Cyan)
@@ -1473,24 +1722,43 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
                     Style::default().fg(Color::White)
                 }),
                 addr_cell,
+                resources_cell,
                 auth_cell,
-                Cell::from(h.group.as_deref().unwrap_or("—"))
-                    .style(Style::default().fg(Color::Magenta)),
-                Cell::from(format_relative_time(h.last_used))
-                    .style(Style::default().fg(Color::DarkGray)),
-                dot_cell,
-            ])
+            ];
+            if !compact {
+                cells.push(
+                    Cell::from(h.group.as_deref().unwrap_or("—").to_string())
+                        .style(Style::default().fg(Color::Magenta)),
+                );
+                cells.push(
+                    Cell::from(format_relative_time(h.last_used))
+                        .style(Style::default().fg(Color::DarkGray)),
+                );
+            }
+            cells.push(dot_cell);
+            Row::new(cells)
         })
         .collect();
 
-    let widths = [
-        Constraint::Percentage(20),
-        Constraint::Percentage(37),
-        Constraint::Length(9),
-        Constraint::Percentage(13),
-        Constraint::Percentage(17),
-        Constraint::Length(5),
-    ];
+    let widths: Vec<Constraint> = if compact {
+        vec![
+            Constraint::Percentage(22),
+            Constraint::Min(18),
+            Constraint::Length(33),
+            Constraint::Length(7),
+            Constraint::Length(5),
+        ]
+    } else {
+        vec![
+            Constraint::Percentage(16),
+            Constraint::Percentage(26),
+            Constraint::Length(33),
+            Constraint::Length(7),
+            Constraint::Percentage(11),
+            Constraint::Percentage(16),
+            Constraint::Length(5),
+        ]
+    };
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -1504,6 +1772,73 @@ fn draw_host_table(frame: &mut Frame, area: Rect, app: &AppState) {
     let mut state = TableState::default();
     state.select(Some(app.selected_row));
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn load_color(pct: f32) -> Color {
+    if pct < 60.0 {
+        Color::Green
+    } else if pct < 85.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
+/// `CPU 34% · RAM 71% (2.8/4 GB)` — or a short state when no metrics are available.
+fn resources_line<'a>(app: &AppState, h: &SshHost, ping: PingState) -> Line<'a> {
+    let dim = Style::default().fg(Color::DarkGray);
+    if !h.monitor || app.monitor.is_none() {
+        return Line::from(Span::styled("—", dim));
+    }
+    if matches!(ping, PingState::Down) {
+        return Line::from(Span::styled("—", dim));
+    }
+    match app.metrics_for(&h.name) {
+        None | Some(MetricsState::Connecting) => {
+            Line::from(Span::styled(format!("… {}", t!("monitor.connecting")), dim))
+        }
+        Some(MetricsState::Unsupported) => Line::from(Span::styled(t!("monitor.na"), dim)),
+        Some(MetricsState::KeyChanged) => Line::from(Span::styled(
+            format!("⚠ {}", t!("monitor.key_changed")),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Some(MetricsState::Failed(_)) => Line::from(Span::styled(
+            format!("✗ {}", t!("monitor.failed")),
+            Style::default().fg(Color::Red),
+        )),
+        Some(MetricsState::Ok(m)) => {
+            let cpu = match m.cpu_pct {
+                Some(pct) => Span::styled(
+                    format!("{:>3.0}%", pct),
+                    Style::default()
+                        .fg(load_color(pct))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                None => Span::styled("  …%", dim),
+            };
+            let mem_pct = m.mem_pct();
+            Line::from(vec![
+                Span::styled("CPU ", dim),
+                cpu,
+                Span::styled(" · RAM ", dim),
+                Span::styled(
+                    format!("{:>3.0}%", mem_pct),
+                    Style::default()
+                        .fg(load_color(mem_pct))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        " ({}/{} {})",
+                        monitor::format_gib(m.mem_used),
+                        monitor::format_gib(m.mem_total),
+                        t!("monitor.gb")
+                    ),
+                    Style::default().fg(Color::Gray),
+                ),
+            ])
+        }
+    }
 }
 
 fn draw_status_strip(frame: &mut Frame, area: Rect, app: &AppState) {
@@ -1535,20 +1870,37 @@ fn draw_status_strip(frame: &mut Frame, area: Rect, app: &AppState) {
                 "  │  ● DOWN",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
-            PingState::Checking => {
-                Span::styled("  │  ● ...", Style::default().fg(Color::Yellow))
-            }
+            PingState::Checking => Span::styled("  │  ● ...", Style::default().fg(Color::Yellow)),
         };
         let note_str = host
             .note
             .as_deref()
-            .map(|n| format!("  │  Note: {n}"))
+            .map(|n| format!("  │  {}: {n}", t!("tui.status.note")))
             .unwrap_or_default();
+        let monitor_span = match app.metrics_for(&host.name) {
+            Some(MetricsState::Failed(err)) => Span::styled(
+                format!("  │  CPU/RAM ✗ {err}"),
+                Style::default().fg(Color::Red),
+            ),
+            Some(MetricsState::KeyChanged) => Span::styled(
+                format!("  │  ⚠ {}", t!("ssh.key.changed_short")),
+                Style::default().fg(Color::Red),
+            ),
+            _ if !host.monitor => Span::styled(
+                format!("  │  {}", t!("tui.status.monitor_hint")),
+                Style::default().fg(Color::DarkGray),
+            ),
+            _ => Span::raw(""),
+        };
         lines.push(Line::from(vec![
-            Span::styled(" Sélection : ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(" {} : ", t!("tui.status.selection")),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(host.name, Style::default().fg(Color::Cyan)),
             Span::raw(format!(" ({endpoint})")),
             ping_span,
+            monitor_span,
             Span::styled(note_str, Style::default().fg(Color::DarkGray)),
         ]));
     }
@@ -1562,9 +1914,9 @@ fn draw_input_bar(frame: &mut Frame, area: Rect, app: &AppState) {
     let border_color = if is_cmd { Color::Yellow } else { Color::Cyan };
 
     let title = if is_cmd {
-        " Commande "
+        format!(" {} ", t!("tui.input.title_command"))
     } else {
-        " Recherche / Commande (/new, /edit, /del, /help) "
+        format!(" {} ", t!("tui.input.title"))
     };
 
     let content = if app.input.is_empty() {
@@ -1576,7 +1928,7 @@ fn draw_input_bar(frame: &mut Frame, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Filtre une machine ou tape /new pour ajouter...",
+                t!("tui.input.placeholder"),
                 Style::default().fg(Color::DarkGray),
             ),
         ])
@@ -1679,7 +2031,7 @@ fn draw_host_autocomplete_popup(frame: &mut Frame, input_area: Rect, app: &AppSt
         .block(
             Block::default()
                 .title(Span::styled(
-                    " Machines (Tab: compléter, ↑↓: choisir, Entrée: valider) ",
+                    format!(" {} ", t!("tui.popup.machines")),
                     Style::default().fg(Color::Cyan),
                 ))
                 .borders(Borders::ALL)
@@ -1706,7 +2058,7 @@ fn draw_slash_popup(frame: &mut Frame, input_area: Rect, app: &AppState) {
     if height < 3 {
         return;
     }
-    let width = 58u16.min(input_area.width);
+    let width = 72u16.min(input_area.width);
     let popup_area = Rect {
         x: input_area.x,
         y: input_area.y.saturating_sub(height),
@@ -1721,12 +2073,12 @@ fn draw_slash_popup(frame: &mut Frame, input_area: Rect, app: &AppState) {
         .map(|c| {
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!(" {:<16}", c.usage),
+                    format!(" {:<20}", c.usage()),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(c.desc, Style::default().fg(Color::Gray)),
+                Span::styled(tr(c.desc_key), Style::default().fg(Color::Gray)),
             ]))
         })
         .collect();
@@ -1735,7 +2087,7 @@ fn draw_slash_popup(frame: &mut Frame, input_area: Rect, app: &AppState) {
         .block(
             Block::default()
                 .title(Span::styled(
-                    " Commandes (Tab: compléter, Entrée: exécuter) ",
+                    format!(" {} ", t!("tui.popup.commands")),
                     Style::default().fg(Color::Yellow),
                 ))
                 .borders(Borders::ALL)
@@ -1753,36 +2105,46 @@ fn draw_slash_popup(frame: &mut Frame, input_area: Rect, app: &AppState) {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect) {
+    let key = |k: &'static str, c: Color| {
+        Span::styled(k, Style::default().fg(c).add_modifier(Modifier::BOLD))
+    };
+    let label = |l: std::borrow::Cow<'static, str>| {
+        Span::styled(format!(" {l}  "), Style::default().fg(Color::DarkGray))
+    };
     let hints = Line::from(vec![
-        Span::styled(" Entrée", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" SSH  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+F", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" Fichiers  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("/new", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Ajouter  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+E", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Éditer  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+D", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Suppr  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+T", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Test  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("/help", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Aide  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Esc", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Quitter", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        key("Enter", Color::Cyan),
+        label(t!("tui.footer.ssh")),
+        key("Ctrl+F", Color::Green),
+        label(t!("tui.footer.files")),
+        key("/new", Color::Cyan),
+        label(t!("tui.footer.add")),
+        key("Ctrl+E", Color::Cyan),
+        label(t!("tui.footer.edit")),
+        key("Ctrl+D", Color::Cyan),
+        label(t!("tui.footer.delete")),
+        key("Ctrl+P", Color::Magenta),
+        label(t!("tui.footer.monitor")),
+        key("/help", Color::Cyan),
+        label(t!("tui.footer.help")),
+        key("Esc", Color::Cyan),
+        Span::styled(
+            format!(" {}", t!("tui.footer.quit")),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
 
     frame.render_widget(Paragraph::new(hints), area);
 }
 
 fn draw_form_modal(frame: &mut Frame, area: Rect, form: &HostForm) {
-    let popup = centered_rect(72, 22, area);
+    let popup = centered_rect(86, 23, area);
     frame.render_widget(Clear, popup);
 
     let title = if let Some(ref orig) = form.editing_original_name {
-        format!(" Modifier la connexion '{}' ", orig)
+        format!(" {} ", t!("tui.form.title_edit", name = orig))
     } else {
-        " Nouvelle connexion SSH (/new) ".to_string()
+        format!(" {} ", t!("tui.form.title_new"))
     };
 
     let block = Block::default()
@@ -1815,74 +2177,111 @@ fn draw_form_modal(frame: &mut Frame, area: Rect, form: &HostForm) {
             Style::default().fg(Color::Gray)
         };
 
-        let (label, value_spans) = match f {
+        let toggle_style = |on: bool, color: Color| {
+            if on {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(color)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            }
+        };
+        let toggle_hint = Span::styled(
+            if active {
+                format!("  ({})", t!("tui.form.toggle_hint"))
+            } else {
+                String::new()
+            },
+            Style::default().fg(Color::DarkGray),
+        );
+
+        let (label_key, value_spans): (&str, Vec<Span>) = match f {
             FormField::Name => (
-                "Nom / Alias       ",
-                render_text_value(&form.name, "ex: mon-pc, serveur-maison", active),
+                "tui.form.name",
+                render_text_value(&form.name, tr("tui.form.ph_name"), active),
             ),
             FormField::Host => (
-                "Hôte / IP         ",
-                render_text_value(&form.host, "ex: 192.168.1.192", active),
+                "tui.form.host",
+                render_text_value(&form.host, "192.168.1.192".to_string(), active),
             ),
             FormField::Port => (
-                "Port              ",
-                render_text_value(&form.port, "22", active),
+                "tui.form.port",
+                render_text_value(&form.port, "22".to_string(), active),
             ),
             FormField::Username => (
-                "Utilisateur       ",
-                render_text_value(&form.username, "ex: root, ubuntu, admin", active),
+                "tui.form.user",
+                render_text_value(&form.username, tr("tui.form.ph_user"), active),
             ),
-            FormField::AuthKind => {
-                let pwd_style = if form.auth_kind == FormAuthKind::Password {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let key_style = if form.auth_kind == FormAuthKind::Key {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Green)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                (
-                    "Authentification  ",
-                    vec![
-                        Span::styled(" Mot de passe ", pwd_style),
-                        Span::raw("  "),
-                        Span::styled(" Clé SSH ", key_style),
-                        Span::styled(
-                            if active { "  (←/→ ou Espace)" } else { "" },
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ],
-                )
-            }
+            FormField::AuthKind => (
+                "tui.form.auth",
+                vec![
+                    Span::styled(
+                        format!(" {} ", t!("tui.form.auth_password")),
+                        toggle_style(form.auth_kind == FormAuthKind::Password, Color::Yellow),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!(" {} ", t!("tui.form.auth_key")),
+                        toggle_style(form.auth_kind == FormAuthKind::Key, Color::Green),
+                    ),
+                    toggle_hint,
+                ],
+            ),
             FormField::Password => (
-                "Mot de passe SSH  ",
-                render_secret_value(&form.password, form.show_secret, "saisir le mot de passe", active),
+                "tui.form.password",
+                render_secret_value(
+                    &form.password,
+                    form.show_secret,
+                    tr("tui.form.ph_password"),
+                    active,
+                ),
             ),
             FormField::KeyPath => (
-                "Clé privée        ",
-                render_text_value(&form.key_path, "~/.ssh/id_ed25519", active),
+                "tui.form.key_path",
+                render_text_value(&form.key_path, "~/.ssh/id_ed25519".to_string(), active),
             ),
             FormField::KeyPassphrase => (
-                "Passphrase (opt.) ",
-                render_secret_value(&form.key_passphrase, form.show_secret, "(vide si aucune)", active),
+                "tui.form.passphrase",
+                render_secret_value(
+                    &form.key_passphrase,
+                    form.show_secret,
+                    tr("tui.form.ph_passphrase"),
+                    active,
+                ),
+            ),
+            FormField::Monitor => (
+                "tui.form.monitor",
+                vec![
+                    Span::styled(
+                        if form.monitor { "[x] " } else { "[ ] " },
+                        if form.monitor {
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                    Span::styled(
+                        tr("tui.form.monitor_desc"),
+                        Style::default().fg(if active { Color::White } else { Color::Gray }),
+                    ),
+                    toggle_hint,
+                ],
             ),
             FormField::Group => (
-                "Groupe (opt.)     ",
-                render_text_value(&form.group, "ex: Maison, Prod, Lab", active),
+                "tui.form.group",
+                render_text_value(&form.group, tr("tui.form.ph_group"), active),
             ),
             FormField::Note => (
-                "Note (opt.)       ",
-                render_text_value(&form.note, "description libre", active),
+                "tui.form.note",
+                render_text_value(&form.note, tr("tui.form.ph_note"), active),
             ),
         };
+        let label = tr(label_key);
+        let pad = 19usize.saturating_sub(label.chars().count());
+        let label = format!("{label}{}", " ".repeat(pad));
 
         let mut spans = vec![Span::styled(format!("{marker}{label}: "), label_style)];
         spans.extend(value_spans);
@@ -1897,30 +2296,63 @@ fn draw_form_modal(frame: &mut Frame, area: Rect, form: &HostForm) {
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            "  Stocké automatiquement dans vault.enc chiffré (AES-256-GCM).",
+            format!("  {}", t!("tui.form.stored")),
             Style::default().fg(Color::DarkGray),
         )));
     }
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled("  Tab/↑↓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Champ  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+R", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" Voir/Masquer mdp  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Ctrl+S", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" Enregistrer  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Esc", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        Span::styled(" Annuler", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  Tab/↑↓",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}  ", t!("tui.form.hint_field")),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            "Ctrl+R",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}  ", t!("tui.form.hint_show")),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            "Ctrl+S",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}  ", t!("tui.form.hint_save")),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            "Esc",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}", t!("tui.form.hint_cancel")),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
 
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(p, inner);
 }
 
-fn render_text_value<'a>(value: &'a str, placeholder: &'a str, active: bool) -> Vec<Span<'a>> {
+fn render_text_value(value: &str, placeholder: String, active: bool) -> Vec<Span<'_>> {
     if value.is_empty() {
-        let mut spans = vec![Span::styled(placeholder, Style::default().fg(Color::DarkGray))];
+        let mut spans = vec![Span::styled(
+            placeholder,
+            Style::default().fg(Color::DarkGray),
+        )];
         if active {
             spans.insert(0, Span::styled("▏", Style::default().fg(Color::Cyan)));
         }
@@ -1937,12 +2369,12 @@ fn render_text_value<'a>(value: &'a str, placeholder: &'a str, active: bool) -> 
     }
 }
 
-fn render_secret_value<'a>(
-    value: &'a str,
+fn render_secret_value(
+    value: &str,
     show: bool,
-    placeholder: &'a str,
+    placeholder: String,
     active: bool,
-) -> Vec<Span<'a>> {
+) -> Vec<Span<'_>> {
     if value.is_empty() {
         return render_text_value(value, placeholder, active);
     }
@@ -1967,7 +2399,7 @@ fn draw_delete_modal(frame: &mut Frame, area: Rect, host_name: &str, endpoint: &
 
     let block = Block::default()
         .title(Span::styled(
-            " Confirmer la suppression ",
+            format!(" {} ", t!("tui.delete.title")),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -1976,7 +2408,7 @@ fn draw_delete_modal(frame: &mut Frame, area: Rect, host_name: &str, endpoint: &
     let text = vec![
         Line::raw(""),
         Line::from(vec![
-            Span::raw("Supprimer la connexion "),
+            Span::raw(format!("{} ", t!("tui.delete.question"))),
             Span::styled(
                 host_name,
                 Style::default()
@@ -1988,31 +2420,33 @@ fn draw_delete_modal(frame: &mut Frame, area: Rect, host_name: &str, endpoint: &
         Line::raw(""),
         Line::from(vec![
             Span::styled(
-                "Entrée / o",
+                format!("Enter / {}", t!("tui.delete.yes_key")),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" : Supprimer    "),
+            Span::raw(format!(" : {}    ", t!("tui.delete.confirm"))),
             Span::styled(
                 "Esc / n",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" : Annuler"),
+            Span::raw(format!(" : {}", t!("tui.form.hint_cancel"))),
         ]),
     ];
 
-    let p = Paragraph::new(text).alignment(Alignment::Center).block(block);
+    let p = Paragraph::new(text)
+        .alignment(Alignment::Center)
+        .block(block);
     frame.render_widget(p, popup);
 }
 
-fn draw_help_modal(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(76, 25, area);
+fn draw_help_modal(frame: &mut Frame, area: Rect, scroll: u16) {
+    let popup = centered_rect(96, 40, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
         .title(Span::styled(
-            " Aide — ssha ",
+            format!(" {} ", t!("tui.help.title")),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -2020,53 +2454,151 @@ fn draw_help_modal(frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    let lines = vec![
-        Line::raw(""),
+    let heading = |text: std::borrow::Cow<'static, str>| {
         Line::from(Span::styled(
-            "  Commandes interactives (dans la barre >) :",
+            format!("  {text}"),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("    /new             Ajouter une nouvelle machine SSH"),
-        Line::from("    /files [nom]     Ouvrir le gestionnaire de fichiers distant (SFTP)"),
-        Line::from("    /edit [nom]      Modifier la machine sélectionnée"),
-        Line::from("    /del [nom]       Supprimer une machine"),
-        Line::from("    /connect [nom]   Se connecter immédiatement"),
-        Line::from("    /test [nom]      Vérifier si le port SSH répond"),
-        Line::from("    /help            Afficher cette aide   │  /quit  Quitter"),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  Raccourcis clavier :",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("    ↑ / ↓            Sélectionner une machine"),
-        Line::from("    Entrée           Lancer la connexion SSH"),
-        Line::from("    Ctrl+F           Gérer / télécharger les fichiers distants (SFTP)"),
-        Line::from("    Ctrl+N / F2      Ajouter (/new)"),
-        Line::from("    Ctrl+E           Modifier   │  Ctrl+D   Supprimer"),
-        Line::from("    Ctrl+T           Tester     │  Esc      Effacer / Quitter"),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  Commandes directes depuis ton terminal :",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("    ssha <nom>                        Connexion SSH directe"),
-        Line::from("    ssha files <nom> [chemin]         Explorateur de fichiers distant"),
-        Line::from("    ssha get <nom> <distant> [local]  Télécharger un fichier/dossier"),
-        Line::from("    ssha put <nom> <local> [distant]  Envoyer un fichier/dossier"),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "  Appuie sur Esc ou Entrée pour fermer.",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+        ))
+    };
+    let row = |left: String, right: String| Line::from(format!("   {left:<22} {right}"));
 
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    let mut lines = vec![Line::raw(""), heading(t!("tui.help.section_commands"))];
+    for c in SLASH_COMMANDS {
+        if matches!(c.cmd, "/clear") {
+            continue;
+        }
+        lines.push(row(c.usage(), tr(c.desc_key)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(heading(t!("tui.help.section_keys")));
+    for (keys, desc) in [
+        ("↑ / ↓", "tui.help.key_select"),
+        ("Enter", "tui.help.key_connect"),
+        ("Ctrl+F", "tui.slash.files"),
+        ("Ctrl+N / F2", "tui.slash.new"),
+        ("Ctrl+E · Ctrl+D", "tui.help.key_edit_delete"),
+        ("Ctrl+T", "tui.slash.test"),
+        ("Ctrl+P", "tui.slash.monitor"),
+        ("Ctrl+R / F5", "tui.slash.refresh"),
+        ("Esc", "tui.help.key_esc"),
+    ] {
+        lines.push(row(keys.to_string(), tr(desc)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(heading(t!("tui.help.section_terminal")));
+    for (cmd, desc) in [
+        (
+            format!("ssha <{}>", tr("tui.arg.name")),
+            "tui.help.term_connect",
+        ),
+        (
+            format!("ssha files <{}> [path]", tr("tui.arg.name")),
+            "cli.help.files.about",
+        ),
+        (
+            format!("ssha get <{}> <remote> [local]", tr("tui.arg.name")),
+            "cli.help.get.about",
+        ),
+        (
+            format!("ssha put <{}> <local> [remote]", tr("tui.arg.name")),
+            "cli.help.put.about",
+        ),
+        ("ssha lang <code>".to_string(), "cli.help.lang.about"),
+    ] {
+        lines.push(row(cmd, tr(desc)));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", t!("tui.help.close")),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = block.title_bottom(Line::from(Span::styled(
+        " ↑/↓ PgUp/PgDn · Esc ",
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        popup,
+    );
+}
+
+/// "What's new" screen: new features ✨, fixes 🐛 and changes 🔧 of recent versions.
+fn draw_whats_new_modal(frame: &mut Frame, area: Rect, notes: &[VersionNotes], scroll: u16) {
+    let popup = centered_rect(92, 30, area);
+    frame.render_widget(Clear, popup);
+
+    let title = match notes.first() {
+        Some(v) => format!(" ✨ {} ", t!("update.whats_new_title", version = v.version)),
+        None => format!(" ✨ {} ", t!("update.notes.added")),
+    };
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(Span::styled(
+            format!(" {} ", t!("update.whats_new_hint")),
+            Style::default().fg(Color::DarkGray),
+        )))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+
+    let mut lines: Vec<Line> = Vec::new();
+    for v in notes {
+        lines.push(Line::raw(""));
+        let header = match &v.date {
+            Some(d) => format!(" v{} — {}", v.version, d),
+            None => format!(" v{}", v.version),
+        };
+        lines.push(Line::from(Span::styled(
+            header,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (emoji, key, items, color) in [
+            ("✨", "update.notes.added", &v.notes.added, Color::Green),
+            ("🐛", "update.notes.fixed", &v.notes.fixed, Color::Yellow),
+            ("🔧", "update.notes.changed", &v.notes.changed, Color::Blue),
+        ] {
+            if items.is_empty() {
+                continue;
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  {emoji} {}", tr(key)),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )));
+            for item in items {
+                if let Some(sub) = item.strip_prefix("  ") {
+                    lines.push(Line::from(vec![
+                        Span::styled("       ◦ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(sub.to_string(), Style::default().fg(Color::Gray)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("    • ", Style::default().fg(color)),
+                        Span::raw(item.clone()),
+                    ]));
+                }
+            }
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        popup,
+    );
 }
 
 fn centered_rect(max_width: u16, max_height: u16, area: Rect) -> Rect {
@@ -2109,19 +2641,19 @@ mod tests {
         assert!(matches!(app.modal, Modal::Form(_)));
 
         // Fill form: Name, Host, keep Port=22, Username, AuthKind=Password, Password, Ctrl+S
-        type_str(&mut app, &storage, "mon-ordi");
+        type_str(&mut app, &storage, "my-laptop");
         handle_key(&mut app, press(KeyCode::Tab), &storage).unwrap();
         type_str(&mut app, &storage, "192.168.1.192");
         handle_key(&mut app, press(KeyCode::Tab), &storage).unwrap(); // Port
         handle_key(&mut app, press(KeyCode::Tab), &storage).unwrap(); // Username
-        // Clear prefilled username and set custom one
+                                                                      // Clear prefilled username and set custom one
         if let Modal::Form(ref mut f) = app.modal {
             f.username.clear();
         }
         type_str(&mut app, &storage, "gigi");
         handle_key(&mut app, press(KeyCode::Tab), &storage).unwrap(); // AuthKind (Password default)
         handle_key(&mut app, press(KeyCode::Tab), &storage).unwrap(); // Password
-        type_str(&mut app, &storage, "mdp-secret-123");
+        type_str(&mut app, &storage, "secret-pass-123");
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
@@ -2136,14 +2668,14 @@ mod tests {
         // Reload from encrypted disk to confirm persistence
         let reloaded = storage.load_vault().unwrap();
         assert_eq!(reloaded.hosts.len(), 1);
-        assert_eq!(reloaded.hosts[0].name, "mon-ordi");
+        assert_eq!(reloaded.hosts[0].name, "my-laptop");
 
         // Live filter by IP and press Enter -> TuiAction::Connect
         type_str(&mut app, &storage, "192.168");
         let action = handle_key(&mut app, press(KeyCode::Enter), &storage).unwrap();
         match action {
             Some(TuiAction::Connect(h)) => {
-                assert_eq!(h.name, "mon-ordi");
+                assert_eq!(h.name, "my-laptop");
                 assert_eq!(h.username, "gigi");
             }
             _ => panic!("Expected TuiAction::Connect"),
@@ -2165,7 +2697,7 @@ mod tests {
         let storage = Storage::with_dir(dir.path().to_path_buf()).unwrap();
         let mut vault = VaultData::default();
         vault.hosts.push(SshHost {
-            name: "mon-ordi".into(),
+            name: "my-laptop".into(),
             host: "192.168.1.192".into(),
             port: 22,
             username: "gigi".into(),
@@ -2178,6 +2710,7 @@ mod tests {
             local_forwards: Vec::new(),
             extra_keys: Vec::new(),
             forward_agent: false,
+            monitor: false,
             created_at: Utc::now(),
             last_used: None,
         });
@@ -2195,17 +2728,18 @@ mod tests {
             local_forwards: Vec::new(),
             extra_keys: Vec::new(),
             forward_agent: false,
+            monitor: false,
             created_at: Utc::now(),
             last_used: None,
         });
         let mut app = AppState::new(vault, None);
 
-        // 1. Direct typing `mon` -> suggests `mon-ordi` -> Tab completes to `mon-ordi`
-        type_str(&mut app, &storage, "mon");
+        // 1. Direct typing `my` -> suggests `my-laptop` -> Tab completes to `my-laptop`
+        type_str(&mut app, &storage, "my");
         assert_eq!(app.host_suggestions().len(), 1);
-        assert_eq!(app.host_suggestions()[0].name, "mon-ordi");
+        assert_eq!(app.host_suggestions()[0].name, "my-laptop");
         handle_key(&mut app, press(KeyCode::Tab), &storage).unwrap();
-        assert_eq!(app.input, "mon-ordi");
+        assert_eq!(app.input, "my-laptop");
         // Popup hides once exact unique match is completed
         assert!(app.host_suggestions().is_empty());
 

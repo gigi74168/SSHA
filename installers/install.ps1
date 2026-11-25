@@ -1,5 +1,5 @@
-# Installateur Windows 10 / 11 pour ssha
-# Installe ssha.exe dans %LOCALAPPDATA%\Programs\ssha et l'ajoute au PATH utilisateur.
+# Windows 10 / 11 installer for ssha
+# Installs ssha.exe into %LOCALAPPDATA%\Programs\ssha and adds it to the user PATH.
 
 [CmdletBinding()]
 param(
@@ -12,7 +12,7 @@ $Repo = "gigi74168/SSHA"
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ssha"
 $DestExe = Join-Path $InstallDir "ssha.exe"
 
-Write-Host "[ssha] Installation de ssha pour Windows..." -ForegroundColor Cyan
+Write-Host "[ssha] Installing ssha for Windows..." -ForegroundColor Cyan
 
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -49,7 +49,7 @@ if (-not $Installed -and $RepoRoot -and (Get-Command cargo -ErrorAction Silently
     try {
         & cargo build --release
         if ($LASTEXITCODE -ne 0) {
-            throw "La compilation Cargo a échoué (code $LASTEXITCODE)."
+            throw "The Cargo build failed (code $LASTEXITCODE)."
         }
         Copy-Item -Path (Join-Path $RepoRoot "target\release\ssha.exe") -Destination $DestExe -Force
         $Installed = $true
@@ -61,15 +61,15 @@ if (-not $Installed -and $RepoRoot -and (Get-Command cargo -ErrorAction Silently
 # 3. Otherwise download prebuilt binary from GitHub Releases
 if (-not $Installed) {
     $DownloadUrl = "https://github.com/$Repo/releases/latest/download/ssha-windows-x86_64.exe"
-    Write-Host "[ssha] Téléchargement de la dernière release Windows..." -ForegroundColor Cyan
+    Write-Host "[ssha] Downloading the latest Windows release..." -ForegroundColor Cyan
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $DestExe -UseBasicParsing
         $Installed = $true
     } catch {
-        Write-Host "[✗] Impossible de télécharger depuis $DownloadUrl." -ForegroundColor Red
-        Write-Host "    Si aucune release n'est encore publiée, installe Rust (https://rustup.rs)," -ForegroundColor Yellow
-        Write-Host "    clone le dépôt et relance .\installers\install.ps1" -ForegroundColor Yellow
+        Write-Host "[✗] Unable to download from $DownloadUrl." -ForegroundColor Red
+        Write-Host "    If no release is published yet, install Rust (https://rustup.rs)," -ForegroundColor Yellow
+        Write-Host "    clone the repository and run .\installers\install.ps1 again" -ForegroundColor Yellow
         return
     }
 }
@@ -90,7 +90,7 @@ foreach ($part in $PathParts) {
 if (-not $AlreadyInPath) {
     $NewUserPath = if ($UserPath.Trim() -eq "") { $InstallDir } else { "$UserPath;$InstallDir" }
     [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
-    Write-Host "[✓] Dossier ajouté au PATH utilisateur Windows : $InstallDir" -ForegroundColor Green
+    Write-Host "[✓] Folder added to the Windows user PATH: $InstallDir" -ForegroundColor Green
 
     # Broadcast WM_SETTINGCHANGE so new terminals see the updated PATH immediately
     try {
@@ -114,5 +114,5 @@ if ($env:Path -notlike "*$InstallDir*") {
 }
 
 Write-Host ""
-Write-Host "[✓] ssha est installé dans : $DestExe" -ForegroundColor Green
-Write-Host "[✓] Ouvre PowerShell, CMD ou Windows Terminal et tape simplement : ssha" -ForegroundColor Green
+Write-Host "[✓] ssha is installed in: $DestExe" -ForegroundColor Green
+Write-Host "[✓] Open PowerShell, CMD or Windows Terminal and simply type: ssha" -ForegroundColor Green

@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-echo Lancement de l'installateur ssha pour Windows...
+echo Starting the ssha installer for Windows...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
 echo.
 pause
